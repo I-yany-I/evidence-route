@@ -68,12 +68,13 @@ class DebatePattern(CollaborationPattern):
 
     def _judge_task(self, pro_views: list[str], con_views: list[str],
                     facts_summary: str) -> str:
-        parts = ["请根据正反双方观点与事实作出裁决："]
-        parts.append("正方观点：\n" + "\n".join(f"- {v}" for v in pro_views))
-        parts.append("反方观点：\n" + "\n".join(f"- {v}" for v in con_views))
+        # 证据优先、观点其次：先给共享事实，再给双方论证，裁判只认证据与论证强度
+        parts = ["请根据证据与正反双方观点作出裁决（证据优先于观点）："]
         if facts_summary:
             parts.append("已知事实：\n" + facts_summary)
-        parts.append('输出 JSON：{"verdict": "...", "reasoning": "..."}')
+        parts.append("正方观点：\n" + "\n".join(f"- {v}" for v in pro_views))
+        parts.append("反方观点：\n" + "\n".join(f"- {v}" for v in con_views))
+        parts.append('输出 JSON：{"verdict": "...", "reasoning": "..."}，verdict 必须是 真实/虚假/部分属实/证据不足 之一。')
         return "\n\n".join(parts)
 
 
