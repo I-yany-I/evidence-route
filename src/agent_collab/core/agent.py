@@ -63,14 +63,19 @@ class AgentRuntime:
         return "\n".join(lines)
 
     async def run(self, task: str, context: dict | None = None) -> Message:
-        """执行任务，返回 RESULT 消息；工具调用与结果写入 audit。"""
+        """执行任务，返回 RESULT 消息；任务起止、工具调用与结果写入 audit，RESULT 写入 memory。"""
+        self.audit.record("agent_start", self.spec.id, {"task": task})
         tool_schemas = self.registry.openai_schemas(self.spec.tools) if self.spec.tools else None
         system = {"role": "system", "content": self.system_prompt()}
         history: list[dict] = [{"role": "user", "content": self._build_task(task, context)}]
 
         final_text = ""
         for step in range(self.max_steps):
-            payload = [system] + history[-_HISTORY_LIMIT:]
+            # 始终保留首条任务消息，裁剪窗口只作用于其后的历史
+            if len(history) <= 1:
+                payload = [system] + history
+            else:
+                payload = [system, history[0]] + history[1:][-(_HISTORY_LIMIT - 1):]
             resp = self.llm.complete(payload, tools=tool_schemas)
             content = resp.get("content")
             tool_calls = resp.get("tool_calls")
@@ -102,12 +107,15 @@ class AgentRuntime:
                 })
 
         # max_steps 耗尽时以最近文本兜底，仍返回 RESULT 消息
-        return new_message(
+        result = new_message(
             sender=self.spec.id,
             recipient="system",
             type_=MessageType.RESULT,
             payload={"content": final_text, "data": {}},
         )
+        self.audit.record("agent_result", self.spec.id, {"content": final_text})
+        self.memory.post(result)
+        return result
 
     @staticmethod
     def _build_task(task: str, context: dict | None) -> str:

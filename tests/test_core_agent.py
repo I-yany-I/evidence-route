@@ -239,5 +239,22 @@ def test_run_trims_history_to_recent_20():
     asyncio.run(rt.run("核查声明"))
     last_messages = llm.calls[-1]["messages"]
     assert last_messages[0]["role"] == "system"
-    # system + 最近 20 条历史
+    # system + 首条任务 + 最近 19 条历史
     assert len(last_messages) <= 21
+    # 首条任务消息必须始终保留在上下文中（防止"任务失忆"）
+    assert last_messages[1]["role"] == "user"
+    assert "核查声明" in last_messages[1]["content"]
+
+
+def test_run_falls_back_to_last_text_after_max_steps():
+    """content+tool_calls 并存、随后持续 tool_calls 触达 max_steps：以最近非空文本兜底。"""
+    responses = [
+        {"content": "阶段性结论", "tool_calls": [{"name": "web_search", "arguments": {}}]},
+        {"content": None, "tool_calls": [{"name": "web_search", "arguments": {}}]},
+        {"content": None, "tool_calls": [{"name": "web_search", "arguments": {}}]},
+    ]
+    llm = FakeLLM(responses)
+    rt = make_runtime(llm=llm, max_steps=3)
+    result = asyncio.run(rt.run("核查声明"))
+    assert result.type is MessageType.RESULT
+    assert result.payload["content"] == "阶段性结论"

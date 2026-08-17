@@ -31,7 +31,9 @@ class SharedMemory:
         self._messages.append(msg)
 
     def history(self, limit: int = 50) -> list[Message]:
-        """返回最近 limit 条消息（按写入顺序）。"""
+        """返回最近 limit 条消息（按写入顺序）；limit <= 0 时返回空列表。"""
+        if limit <= 0:
+            return []
         return self._messages[-limit:]
 
     def record_fact(self, fact: Fact) -> None:

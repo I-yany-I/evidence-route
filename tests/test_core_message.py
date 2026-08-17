@@ -6,6 +6,7 @@
 from datetime import datetime
 
 import pytest
+import pydantic
 
 from agent_collab.core import Message, MessageType, new_message
 
@@ -65,5 +66,5 @@ def test_result_payload_structure():
 
 def test_message_requires_required_fields():
     """缺少必填字段时应触发校验错误。"""
-    with pytest.raises(Exception):
+    with pytest.raises(pydantic.ValidationError):
         Message(id="1", sender="s")  # 缺 recipient/type/payload/ts

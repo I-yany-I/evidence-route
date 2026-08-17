@@ -11,7 +11,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
-from openai import OpenAI
+from openai import APIConnectionError, APITimeoutError, OpenAI
+
+_RETRY_BACKOFF_S = 0.1  # 重试退避基数（秒），测试友好
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """仅网络/超时/服务端(≥500)/限流(429)错误值得重试；4xx 与编程错误直接失败。"""
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return True
+    status = getattr(exc, "status_code", None)
+    return status is not None and (status >= 500 or status == 429)
 
 
 @dataclass
@@ -82,11 +92,13 @@ class LLMClient:
         for i in range(attempts):
             try:
                 return self._client.chat.completions.create(**kwargs)
-            except Exception as exc:  # noqa: BLE001 - 网络/服务端错误均重试
+            except Exception as exc:  # noqa: BLE001 - 仅瞬态错误重试
                 last_exc = exc
+                if not _is_transient_error(exc):
+                    break
                 if i < attempts - 1:
-                    time.sleep(0.1 * (i + 1))  # 简单退避，测试友好
-        raise LLMError(f"LLM 调用失败（已重试 {self.config.max_retries} 次）：{last_exc}")
+                    time.sleep(_RETRY_BACKOFF_S * (i + 1))  # 简单退避，测试友好
+        raise LLMError(f"LLM 调用失败：{last_exc}")
 
     @staticmethod
     def _parse_json(content: str | None) -> dict:
@@ -133,16 +145,20 @@ def _ensure_v1(base_url: str) -> str:
 
 
 def load_llm_config(path: Path) -> LLMConfig:
-    """读 config/llm.yaml；api_key 以 '$' 开头时视为环境变量名并取值。"""
+    """读 config/llm.yaml；api_key 以 '$' 开头时视为环境变量名并取值。
+
+    可选字段仅在 YAML 提供时才传入，dataclass 默认值是唯一事实源。
+    """
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     api_key = data.get("api_key", "")
     if isinstance(api_key, str) and api_key.startswith("$"):
         api_key = os.environ.get(api_key[1:], "")
-    return LLMConfig(
-        base_url=data["base_url"],
-        api_key=api_key,
-        model=data["model"],
-        temperature=data.get("temperature", 0.2),
-        timeout_s=data.get("timeout_s", 120.0),
-        max_retries=data.get("max_retries", 3),
-    )
+    kwargs: dict = {
+        "base_url": data["base_url"],
+        "api_key": api_key,
+        "model": data["model"],
+    }
+    for field in ("temperature", "timeout_s", "max_retries"):
+        if field in data:
+            kwargs[field] = data[field]
+    return LLMConfig(**kwargs)

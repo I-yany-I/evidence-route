@@ -44,6 +44,14 @@ class FakeCompletions:
         return item
 
 
+class FakeAPIStatusError(Exception):
+    """模拟 openai SDK 的 APIStatusError：带 status_code 的瞬态/非瞬态错误。"""
+
+    def __init__(self, message, status_code):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class FakeOpenAI:
     def __init__(self, responses):
         self.chat = SimpleNamespace(completions=FakeCompletions(responses))
@@ -182,9 +190,9 @@ def test_complete_tolerates_malformed_tool_arguments():
 
 
 def test_complete_retries_then_succeeds():
-    """前两次失败、第三次成功：重试后正常返回。"""
+    """前两次瞬态失败（500）、第三次成功：重试后正常返回。"""
     client = make_client(
-        [Exception("boom"), Exception("boom"), make_response(content="最终")],
+        [FakeAPIStatusError("boom", 500), FakeAPIStatusError("boom", 500), make_response(content="最终")],
         max_retries=3,
     )
     result = client.complete([{"role": "user", "content": "q"}])
@@ -193,12 +201,20 @@ def test_complete_retries_then_succeeds():
 
 
 def test_complete_raises_llm_error_after_max_retries():
-    """重试 max_retries 次仍失败则抛 LLMError。"""
-    client = make_client([Exception("boom")] * 4, max_retries=3)
+    """重试 max_retries 次仍瞬态失败则抛 LLMError。"""
+    client = make_client([FakeAPIStatusError("boom", 500)] * 4, max_retries=3)
     with pytest.raises(LLMError):
         client.complete([{"role": "user", "content": "q"}])
     # 尝试次数 = 1 + max_retries = 4
     assert len(client._client.chat.completions.calls) == 4  # noqa: SLF001
+
+
+def test_complete_does_not_retry_non_transient_error():
+    """4xx 错误（如 400 参数错误）不重试，直接抛 LLMError。"""
+    client = make_client([FakeAPIStatusError("bad request", 400)] * 4, max_retries=3)
+    with pytest.raises(LLMError):
+        client.complete([{"role": "user", "content": "q"}])
+    assert len(client._client.chat.completions.calls) == 1  # noqa: SLF001
 
 
 # ---------------------------------------------------------------------------
