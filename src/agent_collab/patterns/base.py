@@ -272,4 +272,7 @@ def run_pattern(name: str, team_specs: object, llm: object, registry: object,
     if name == "debate":
         from .debate import DebatePattern
         return DebatePattern(team, memory, audit, config)
-    raise ValueError(f"未知协作模式：{name!r}（应为 pipeline/parallel/supervisor/debate）")
+    if name == "factcheck":
+        from .factcheck import FactCheckPattern
+        return FactCheckPattern(team, memory, audit, config)
+    raise ValueError(f"未知协作模式：{name!r}（应为 pipeline/parallel/supervisor/debate/factcheck）")

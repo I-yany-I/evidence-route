@@ -45,6 +45,15 @@ PATTERN_CONFIGS: dict[str, dict] = {
         "con_prefix": "debater_con",
         "judge_prefix": "judge",
     },
+    "factcheck": {
+        "planner_prefix": "planner",
+        "worker_prefix": "fact_checker",
+        "aggregator_prefix": "editor",
+        "pro_prefix": "debater_pro",
+        "con_prefix": "debater_con",
+        "judge_prefix": "judge",
+        "editor_prefix": "editor",
+    },
     "supervisor": {"supervisor_prefix": "planner"},
     "pipeline": {},
 }

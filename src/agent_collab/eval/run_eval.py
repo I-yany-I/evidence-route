@@ -66,7 +66,7 @@ def run_eval(
     *,
     make_llm: Callable[[LLMConfig], Any] | None = None,
     offline: bool = True,
-    pattern: str = "parallel",
+    pattern: str = "factcheck",
     limit: int | None = None,
     out: Path | None = None,
 ) -> dict:
@@ -168,8 +168,8 @@ def _render_report(items: list, rows: list[dict], summary: dict) -> str:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="事实核查评测")
     parser.add_argument("--offline", action="store_true", help="离线模式：web_search 使用样例数据")
-    parser.add_argument("--pattern", default="parallel",
-                        choices=["pipeline", "parallel", "supervisor", "debate"])
+    parser.add_argument("--pattern", default="factcheck",
+                        choices=["pipeline", "parallel", "supervisor", "debate", "factcheck"])
     parser.add_argument("--limit", type=int, default=None, help="只跑前 N 条（成本控制）")
     parser.add_argument("--out", default=None, help="报告输出路径")
     return parser

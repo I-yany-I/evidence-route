@@ -1,6 +1,6 @@
 # 工作流配置（契约见 docs/contracts.md §11）
 workflow:
-  pattern: parallel          # pipeline | parallel | supervisor | debate
+  pattern: factcheck        # factcheck(核查→辩论→裁决→撰写) | parallel | supervisor | debate | pipeline
   llm_config: config/llm.yaml
   team_config: config/agents/fact_check_team.yaml
   mcp:
