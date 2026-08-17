@@ -1,0 +1,8 @@
+{"id": "gpt4o-2024", "claim": "OpenAI 于 2024 年 5 月发布多模态大模型 GPT-4o，支持文本、语音和图像的实时推理。", "label": "true", "key_facts": ["OpenAI 发布 GPT-4o", "发布时间为 2024 年 5 月", "GPT-4o 为多模态模型", "支持文本、语音、图像"]}
+{"id": "eu-ai-act-2024", "claim": "欧盟《人工智能法案》于 2024 年 8 月 1 日正式生效，是全球首部综合性 AI 监管法规。", "label": "true", "key_facts": ["欧盟人工智能法案", "2024 年 8 月 1 日生效", "全球首部综合性 AI 监管法规"]}
+{"id": "apple-iphone-2025", "claim": "苹果公司于 2025 年宣布全面停产并放弃 iPhone 产品线，转而只销售 Vision Pro。", "label": "false", "key_facts": ["苹果停产 iPhone", "放弃 iPhone 产品线", "只销售 Vision Pro"]}
+{"id": "china-fuel-ban-2024", "claim": "中国宣布自 2025 年起全面禁止所有燃油汽车的销售与生产。", "label": "false", "key_facts": ["中国全面禁止燃油车", "2025 年起实施", "禁止燃油车销售与生产"]}
+{"id": "tesla-cybercab-2025", "claim": "特斯拉于 2025 年发布无人驾驶出租车 Cybercab，并已在全球范围内实现大规模商业化运营。", "label": "mixed", "key_facts": ["特斯拉发布 Cybercab", "2025 年发布", "无人驾驶出租车", "全球大规模商业化运营"]}
+{"id": "us-ai-export-2025", "claim": "美国于 2025 年发布人工智能行政命令，限制部分先进 AI 芯片对华出口，但具体实施细则仍在调整。", "label": "mixed", "key_facts": ["美国发布 AI 行政命令", "限制先进 AI 芯片对华出口", "2025 年", "实施细则仍在调整"]}
+{"id": "room-temp-superconductor-2026", "claim": "某中国初创公司于 2026 年实现了室温超导材料的量产突破。", "label": "insufficient", "key_facts": ["中国初创公司", "室温超导材料", "2026 年量产", "量产突破"]}
+{"id": "agi-ban-2026", "claim": "某国将在 2026 年出台全面禁止通用人工智能研发的立法。", "label": "insufficient", "key_facts": ["2026 年立法", "全面禁止通用人工智能研发"]}
