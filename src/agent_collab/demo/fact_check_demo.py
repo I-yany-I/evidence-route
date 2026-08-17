@@ -239,12 +239,33 @@ async def run_fact_check_async(
     specs = parse_specs(team)
     memory = SharedMemory()
     audit = audit or AuditLog()
-    approver = Approver(auto_approve=bool((wf.get("approval") or {}).get("auto_approve", True)))
+    approver = Approver(
+        auto_approve=bool((wf.get("approval") or {}).get("auto_approve", True)),
+        audit=audit,
+    )
+
+    # MCP：按 workflow 配置连接并桥接为只读工具（try/finally 保证子进程回收）
+    mcp = None
+    mcp_cfg = wf.get("mcp") or {}
+    if mcp_cfg.get("enabled"):
+        from ..tools import MCPClient
+
+        mcp = MCPClient(
+            mcp_cfg["command"], mcp_cfg.get("args") or [],
+            cwd=mcp_cfg.get("cwd"), env=mcp_cfg.get("env"),
+            timeout_s=float(mcp_cfg.get("timeout_s", 180.0)),
+        )
+        await mcp.connect()
+        mcp.register_into(registry)
 
     config = dict(PATTERN_CONFIGS.get(pattern, {}))
     config["replicas"] = dict(team.get("replicas") or {})
     pattern_obj = run_pattern(pattern, specs, llm, registry, memory, audit, approver, config)
-    result = await pattern_obj.run(query)
+    try:
+        result = await pattern_obj.run(query)
+    finally:
+        if mcp is not None:
+            await mcp.close()
 
     result.audit_path = _export_audit(result, query, pattern)  # type: ignore[attr-defined]
     return result

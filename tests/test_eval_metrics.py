@@ -31,6 +31,14 @@ def test_normalize_verdict_returns_raw_when_no_match():
     assert normalize_verdict(" 无判定词 ") == "无判定词"
 
 
+def test_normalize_verdict_aliases_team_vocabulary():
+    # 团队内部词汇（支持/反对/存疑）归一化到金标词汇
+    assert normalize_verdict("核查判定：支持。") == "真实"
+    assert normalize_verdict("结论为反对") == "虚假"
+    assert normalize_verdict("证据不足，无法判定") == "证据不足"
+    assert normalize_verdict("不支持该说法") == "虚假"
+
+
 # ---------------------------------------------------------------------------
 # coverage
 # ---------------------------------------------------------------------------

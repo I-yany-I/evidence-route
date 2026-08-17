@@ -36,12 +36,30 @@ def _run_single_agent(
     memory = SharedMemory()
     audit = AuditLog()
     approver = Approver(auto_approve=True)
-    runtime = AgentRuntime(desc["spec"], llm, registry, memory, audit, approver)
+    counted = _UsageCountingLLM(llm)
+    runtime = AgentRuntime(desc["spec"], counted, registry, memory, audit, approver)
     msg = asyncio.run(runtime.run(query))
     return {
         "answer": (msg.payload.get("content") or "").strip(),
-        "tokens": int(getattr(llm, "usage_total", 0) or 0),
+        "tokens": counted.usage_total,
     }
+
+
+class _UsageCountingLLM:
+    """给基线 LLM 包一层 usage 计数（LLMClient 本身不累计，只在结果里透传 usage）。"""
+
+    def __init__(self, delegate: Any):
+        self._delegate = delegate
+        self.usage_total = 0
+
+    def complete(self, messages, tools=None, json_schema=None, max_tokens=None):
+        result = self._delegate.complete(messages, tools=tools, json_schema=json_schema, max_tokens=max_tokens)
+        if isinstance(result, dict) and isinstance(result.get("usage"), dict):
+            self.usage_total += int(result["usage"].get("total_tokens", 0) or 0)
+        return result
+
+    def json_complete(self, messages, json_schema, max_tokens=None):
+        return self._delegate.json_complete(messages, json_schema, max_tokens=max_tokens)
 
 
 def run_eval(
@@ -99,6 +117,14 @@ def run_eval(
             "base_coverage": coverage(base["answer"], item.key_facts),
             "base_tokens": int(base["tokens"]),
         })
+
+    if not rows:
+        return {
+            "multi_accuracy": 0.0, "base_accuracy": 0.0,
+            "multi_coverage_avg": 0.0, "base_coverage_avg": 0.0,
+            "multi_tokens_total": 0, "base_tokens_total": 0,
+            "multi_wall_s_total": 0.0,
+        }
 
     summary = {
         "multi_accuracy": verdict_accuracy(multi_preds, labels),

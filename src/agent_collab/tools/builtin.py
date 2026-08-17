@@ -40,7 +40,11 @@ def _web_search(args: dict) -> ToolResult:
 
 
 def _python_repl(args: dict) -> ToolResult:
-    """在临时目录用 python -c 执行代码；5s 超时，输出截断 2000 字符。"""
+    """在临时目录用 python -c 执行代码；5s 超时，输出截断 2000 字符。
+
+    注意：这是「受审批门控的子进程执行」，不是安全沙箱——子进程继承完整环境，
+    可访问磁盘与网络。生产环境应叠加真正的资源/网络隔离或降权执行。
+    """
     code = str(args.get("code", ""))
     if not code:
         return ToolResult(ok=False, content="", error="缺少 code 参数")
@@ -102,7 +106,7 @@ def register_builtin_tools(registry: ToolRegistry, workspace: Path) -> None:
     ))
     registry.register(ToolSpec(
         name="python_repl",
-        description="在沙箱中执行一段 Python 代码（subprocess，5 秒超时，输出截断 2000 字符）。",
+        description="在受审批门控的子进程中执行 Python 代码（5 秒超时，输出截断 2000 字符；非安全沙箱）。",
         parameters={
             "type": "object",
             "properties": {"code": {"type": "string", "description": "要执行的 Python 代码"}},

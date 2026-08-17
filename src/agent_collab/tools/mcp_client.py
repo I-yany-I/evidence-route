@@ -107,6 +107,8 @@ class MCPClient:
 
     async def call(self, name: str, arguments: dict) -> str:
         """调用工具并返回文本投影（文本块以换行连接）。name 为桥接名。"""
+        if self._proc is None:
+            raise MCPError("MCP 尚未连接，请先调用 connect()")
         prefix = f"mcp__{self._server_name}__"
         if not name.startswith(prefix):
             raise MCPError(f"未知工具：{name}")
@@ -201,6 +203,12 @@ class MCPClient:
         while True:
             frame = await self._read_frame(reader)
             if frame is None:
+                # 服务器崩溃/EOF：让所有在途请求立即失败，而不是挂到超时
+                exc = MCPError("MCP 服务器连接关闭")
+                for fut in list(self._pending.values()):
+                    if not fut.done():
+                        fut.set_exception(exc)
+                self._pending.clear()
                 break
             if isinstance(frame.get("id"), int):
                 fut = self._pending.get(frame["id"])

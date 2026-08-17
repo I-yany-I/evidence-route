@@ -12,8 +12,18 @@ LABEL_TO_VERDICT: dict[str, str] = {
     "insufficient": "证据不足",
 }
 
-# 判定归一化的匹配顺序：长的在前，避免「部分属实」被「真实」误命中
-_VERDICT_ORDER = ["部分属实", "证据不足", "真实", "虚假"]
+# 判定归一化的匹配顺序：长的在前，且「不支持」先于「支持」，避免误命中。
+# 团队内部词汇（支持/反对/存疑）与金标词汇（真实/虚假/部分属实/证据不足）在此统一。
+_VERDICT_ALIASES: list[tuple[str, str]] = [
+    ("部分属实", "部分属实"),
+    ("证据不足", "证据不足"),
+    ("存疑", "证据不足"),
+    ("反对", "虚假"),
+    ("不支持", "虚假"),
+    ("虚假", "虚假"),
+    ("支持", "真实"),
+    ("真实", "真实"),
+]
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]+")
 _LATIN_RE = re.compile(r"[a-z0-9]+")
@@ -24,8 +34,8 @@ def normalize_verdict(text: str) -> str:
     t = (text or "").strip()
     if not t:
         return ""
-    for verdict in _VERDICT_ORDER:
-        if verdict in t:
+    for keyword, verdict in _VERDICT_ALIASES:
+        if keyword in t:
             return verdict
     return t
 

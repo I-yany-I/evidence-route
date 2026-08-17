@@ -33,7 +33,7 @@ class SupervisorPattern(CollaborationPattern):
         last_answer = ""
 
         for _ in range(max_rounds):
-            decision = await self._decide(supervisor, pending)
+            decision = await self._decide(supervisor, pending, workers)
             if decision.get("done"):
                 final = str(decision.get("final") or final)
                 break
@@ -46,7 +46,14 @@ class SupervisorPattern(CollaborationPattern):
                 final = str(decision.get("final") or json.dumps(decision, ensure_ascii=False))
                 break
 
-            worker = self._find_by_id(worker_id)
+            try:
+                worker = self._find_by_id(worker_id)
+            except ValueError:
+                # 模型给出了不存在的 worker id：记录并跳过本轮，避免整次运行崩溃
+                self.audit.record("reassign", supervisor.spec.id, {
+                    "task": task, "reason": f"unknown worker_id {worker_id!r}",
+                })
+                continue
             content = await self._execute_with_retry(worker, task, workers)
             if content:
                 last_answer = content
@@ -55,17 +62,19 @@ class SupervisorPattern(CollaborationPattern):
         answer = final or last_answer
         return self._finish("supervisor", answer, start)
 
-    async def _decide(self, supervisor: AgentRuntime, pending: list[str]) -> dict:
+    async def _decide(self, supervisor: AgentRuntime, pending: list[str],
+                      workers: list[AgentRuntime]) -> dict:
         """让 supervisor 依据 facts 与未完成子任务产出决策 JSON。"""
-        prompt = self._build_decision_prompt(pending)
+        prompt = self._build_decision_prompt(pending, workers)
         msg = await supervisor.run(prompt)
         self._record_tokens(supervisor)
         decision = _parse_decision((msg.payload.get("content") or "").strip())
         self._decision(supervisor.spec.id, decision)
         return decision
 
-    def _build_decision_prompt(self, pending: list[str]) -> str:
+    def _build_decision_prompt(self, pending: list[str], workers: list[AgentRuntime]) -> str:
         lines = ["你是监督者。请根据当前状态决定下一步："]
+        lines.append("可用 worker id：" + "、".join(a.spec.id for a in workers))
         lines.append("未完成子任务：" + ("；".join(pending) if pending else "（无）"))
         facts = self._facts_summary()
         if facts:

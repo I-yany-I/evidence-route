@@ -25,6 +25,6 @@ class PipelinePattern(CollaborationPattern):
             result = await agent.run(task)
             answer = (result.payload.get("content") or "").strip()
             self._record_tokens(agent)
-            task = answer  # 下一个 agent 的上下文 = 前一个 agent 的 content
+            task = answer or query  # 空答案兜底：下一个 agent 仍拿到原始任务
 
         return self._finish("pipeline", answer, start)
