@@ -64,7 +64,8 @@ def run_eval(
     llm_cfg = load_llm_config(llm_path)
     samples = PROJECT_ROOT / str(wf.get("offline_data") or "samples")
 
-    def _make_llm() -> Any:
+    def _make_llm(_cfg: LLMConfig | None = None) -> Any:
+        # run_fact_check 会以 llm_cfg 调用该钩子；此处忽略入参、用闭包里的同一配置
         return make_llm(llm_cfg) if make_llm is not None else LLMClient(llm_cfg)
 
     multi_preds: list[str] = []
