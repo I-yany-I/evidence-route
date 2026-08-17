@@ -197,14 +197,15 @@ def build_team(specs: list[AgentSpec], llm, registry, memory, audit, approver, r
 
 def run_pattern(name: str, team_specs: dict, llm, registry, memory, audit, approver,
                 config: dict) -> CollaborationPattern:
-    """name ∈ {pipeline, parallel, supervisor, debate}；返回对应模式实例（实现文件在 patterns/ 下同名模块）。"""
+    """name ∈ {pipeline, parallel, supervisor, debate, factcheck}；返回对应模式实例（实现文件在 patterns/ 下同名模块）。"""
 ```
 
-四模式行为约定：
+五模式行为约定：
 - **pipeline**：按 team 顺序接力，前一个 RESULT 的 content 作为下一个的 task 上下文；终答 = 最后一个 agent 的 content。
 - **parallel**：`planner` 收到 query → 产出 `{"subtasks": ["...", ...]}`（json 输出）→ `asyncio.gather` 并发执行 replicas 组（subtask 轮流分配）→ `aggregator` 汇总各 RESULT 为终答；memory.facts 合并。终答 = aggregator content。**必须真并发**（gather，不许串行 await 循环）。
 - **supervisor**：supervisor 循环：读当前 facts 与未完成子任务 → 决策 `{"assign": {...} | "done": true, "final": "..."}` → 派活给 worker（worker 用同一 AgentRuntime）→ worker 失败重试 ≤2 次、换人 ≤1 次 → done 时终答 = final。
-- **debate**：`pro` 与 `con` 交替发言（各 2 轮，每轮见对方上一轮观点 + facts）→ `judge` 输出 `{"verdict": "...", "reasoning": "..."}` → 终答 = verdict + reasoning。
+- **debate**：`pro` 与 `con` 交替发言（各 2 轮，每轮见对方上一轮观点 + facts）→ `judge` 输出 `{"verdict": "...", "reasoning": "..."}` → 终答 = verdict + reasoning（证据优先于观点）。
+- **factcheck**（组合模式）：`parallel`（核查，facts 入共享记忆）→ `debate`（辩论+裁决）→ `editor`（依裁决+事实撰写最终报告）；终答 = editor content。复用 parallel/debate 作为子阶段，证明模式可组合。
 
 ## 11. 配置 YAML 约定
 
