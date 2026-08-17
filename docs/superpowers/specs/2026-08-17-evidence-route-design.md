@@ -1,7 +1,7 @@
 # EvidenceRoute：成本感知的自适应事实核查 Agent 设计规格
 
 - 日期：2026-08-17
-- 状态：对话设计已批准，待书面规格复核
+- 状态：书面规格已批准
 - 改造基础：`agent-collab`（原仓库内重构，保留 Git 历史）
 - 目标周期：两周
 
@@ -87,7 +87,7 @@ LangGraph 是唯一工作流编排层。图使用 typed state，开发和测试�
 - `usage`、`node_timings`、`errors`
 - `status`：`running | completed | partial | failed`
 
-路由可观测字段区分初始选择和实际执行结果：`initial_route` 为 `single | multi`，另用 `escalated: bool` 表示单路径是否升级。这样不会把升级样本错误统计为初始多路径选择。
+路由可观测字段区分初始选择和实际执行结果：路由已执行时 `initial_route` 为 `single | multi`，另用 `escalated: bool` 表示单路径是否升级。仅当 probe 在路由前失败且结果为带类型错误的 `failed` 时，`initial_route` 允许为 `null`、`failure_stage` 必须为 `pre_route`；报告将其单列为 `route_not_reached`，不伪造 single/multi，也不进入二者的路由分布分母。
 
 ### 4.2 最终输出
 
@@ -99,7 +99,7 @@ LangGraph 是唯一工作流编排层。图使用 typed state，开发和测试�
 - `confidence`：0 到 1 的模型自报置信度，不宣称经过统计校准；仅 `failed` 状态允许为 `null`
 - `rationale`
 - `citations`
-- `initial_route`、`escalated`
+- `initial_route`、`escalated`、`failure_stage`；仅路由前失败允许 `initial_route=null`
 - `input_tokens`、`output_tokens`、`total_tokens`、`usage_complete`
 - `estimated_cost`、`cost_currency`、`price_config_id`；usage 不完整时 cost 必须为 `null`
 - `latency_ms`
@@ -316,8 +316,10 @@ Agent 进程只读取 claim-only runtime manifest。gold label、gold QA 和 jus
 - single 最多升级一次；multi 最多三个 worker；每个节点和整图都有调用上限。
 - worker 部分失败时，Judge 可以使用成功结果，但输出必须标记 `partial` 并列出失败任务。
 - 无法完成关键检索或判定时输出 `failed`。评测中的 `partial` 和 `failed` 一律按错误计入质量指标，即使 partial 恰好生成与 gold 相同的标签；其预测标签只保留作诊断。
-- 每个付费调用使用 `call_id = SHA256(run_id, node, task_id, logical_attempt)` 作为幂等键。模型响应和 usage 先原子写入 call cache，再更新图状态；checkpoint 恢复时命中同一 `call_id` 必须复用结果，禁止重复付费。
-- checkpoint 写入失败不改变已经持久化的事实判定，但必须记录为可观测错误；无法确认 call cache 是否成功写入时停止自动恢复，避免重复调用。最终 artifact 写入失败则命令返回非零退出码。
+- 每个付费调用使用 `call_id = SHA256(run_id, node, task_id, logical_attempt)` 作为幂等键，并绑定完整非密钥请求的 SHA-256。调用生命周期按 `reserved -> sent -> completed | usage_missing | billing_uncertain` 原子持久化；已收到但缺少 usage 的响应保存在 `usage_missing` 终态，恢复时只能复用该响应并停止严格活动，不能重发或把成本记为 0。
+- checkpoint 写入失败不改变已经持久化的事实判定，但必须记录为可观测错误。进程异常退出后遗留的 `RUNNING` 工作项在恢复入口先转换为可恢复状态，再检查 call store 与 checkpoint；无法确认 call cache 是否成功写入或 `sent` 是否计费时停止自动恢复，避免重复调用。最终 artifact 写入失败则命令返回非零退出码。
+- worker 局部检索/调用错误转换为带类型错误的 `failed` worker；claim 级关键基础设施错误转换为零调用或已计费调用的 `failed` artifact。预算耗尽、usage 缺失、计费不确定和模型漂移属于活动级停止原因，不得伪装成普通预测失败。
+- campaign 持久化枚举化停止原因及其优先级。模型漂移、usage 缺失或计费不确定只停止当前活动并保留未开始项，不能将其写成用户取消；`cancelled` 只允许由显式用户取消产生。
 - 第三方模型即使接受 seed 也不保证位级确定性；“可复现”只表示数据、协议、配置和 artifacts 可复跑，不承诺生成文本完全一致。
 
 ## 9. 安全与隐私
@@ -378,14 +380,16 @@ checkpoint 恢复事件额外记录 call cache hit/miss、恢复前累计 usage 
 - CI 只运行确定性离线测试，不需要 API key 或网络。
 - scorer 测试证明 runtime manifest 不含 gold 字段，`NO_PREDICTION` 会在全 manifest 指标中惩罚而不会被官方适配器伪造标签。
 - budget/model identity 测试覆盖 usage 缺失、model ID 漂移、repair/retry 计费、运行中熔断和 incomplete campaign。
-- checkpoint 测试证明相同 `call_id` 在恢复后命中 cache，不会重复调用 Fake LLM。
+- checkpoint 测试证明相同 `call_id` 在恢复后命中 cache，不会重复调用 Fake LLM，并覆盖进程终止后持久化 `RUNNING` 状态以及 SQLite 已完成、artifact 尚未关闭的崩溃窗口。
+- 分解测试证明 task ID 唯一且每个 claim-unit 引用有效，避免并行 worker 共享付费调用幂等键。
 
 ## 12. 用户界面与命令行
 
-提供三个主要 CLI 命令：
+提供四个主要 CLI 命令：
 
 - `verify`：核查单条 claim；Gate A 支持 frozen provider 和固定/adaptive 策略，Gate B 增加 live provider。
-- `evaluate`：按 manifest 执行可恢复评测，执行前展示预算上界。
+- `calibrate`：创建活动、收集 32 条 train artifacts，并在隔离 scorer 进程中 replay 冻结策略。
+- `evaluate`：按 manifest 执行可恢复评测，执行前展示预算上界；正式 dev 首次运行必须通过显式“校准完成后进入 dev”阶段转换附着到同一活动，不能混同于崩溃恢复。
 - `report`：从保存的 artifacts 重新生成统计和 Markdown，不重复调用模型。
 
 Gate B 提供一个只读 Streamlit 演示页，展示 claim、最终标签、置信度、初始路由、是否升级、证据引用、Token、估算成本、延迟和错误。UI 不提供登录、写操作、审批或后台任务系统；其职责只是让面试官快速检查一条真实 trace。
