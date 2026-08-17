@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 测试与缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 运行时产物
+artifacts/
+eval/report.md.tmp
+*.log
+
+# 本地配置与密钥
+config/llm.yaml
+.env
+
+# IDE
+.idea/
+.vscode/
