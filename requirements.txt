@@ -1,0 +1,10 @@
+# AgentCollab 依赖清单
+# 与 conda 环境 agent-collab（Python 3.11）实测安装版本一致，采用 >= 宽松约束。
+# 安装：pip install -r requirements.txt
+langgraph>=1.2
+openai>=3.1
+pydantic>=2.13
+pyyaml>=6.0
+gradio>=6.24
+pytest>=9.1
+duckduckgo-search>=8.1
