@@ -64,6 +64,11 @@ class ParallelPattern(CollaborationPattern):
         ])
         for worker in workers:
             self._record_tokens(worker)
+        # 把各 worker 的核查结果写入共享事实库（供 aggregator/judge/审计回放使用）
+        for worker, bucket in zip(workers, bucket_results):
+            for task, msg in bucket:
+                content = (msg.payload.get("content") if msg else "") or ""
+                self._record_facts(worker.spec.id, task, content)
 
         # 3. aggregator 汇总
         summary = self._summarize(bucket_results)

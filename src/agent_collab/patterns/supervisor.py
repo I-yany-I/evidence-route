@@ -83,6 +83,7 @@ class SupervisorPattern(CollaborationPattern):
             self._record_tokens(worker)
             content = (msg.payload.get("content") or "").strip()
             if content:
+                self._record_facts(worker.spec.id, task, content)
                 return content
             if attempt < 2:
                 self.audit.record("retry", worker.spec.id, {"task": task, "attempt": attempt + 1})
@@ -96,6 +97,7 @@ class SupervisorPattern(CollaborationPattern):
             self._record_tokens(alt)
             content = (msg.payload.get("content") or "").strip()
             if content:
+                self._record_facts(alt.spec.id, task, content)
                 return content
             break  # 只换 1 次
         return None

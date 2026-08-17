@@ -125,7 +125,7 @@ class LLMClient:
         return {}
 
     def _to_result(self, resp) -> dict:
-        """把 SDK 响应归一化为契约 dict。"""
+        """把 SDK 响应归一化为契约 dict；透传 usage 供 token 计量。"""
         message = resp.choices[0].message
         tool_calls = None
         if getattr(message, "tool_calls", None):
@@ -133,7 +133,12 @@ class LLMClient:
                 {"name": tc.function.name, "arguments": self._parse_arguments(tc.function.arguments)}
                 for tc in message.tool_calls
             ]
-        return {"content": getattr(message, "content", None), "tool_calls": tool_calls}
+        result = {"content": getattr(message, "content", None), "tool_calls": tool_calls}
+        usage = getattr(resp, "usage", None)
+        total = getattr(usage, "total_tokens", None)
+        if total is not None:
+            result["usage"] = {"total_tokens": int(total)}
+        return result
 
 
 def _ensure_v1(base_url: str) -> str:

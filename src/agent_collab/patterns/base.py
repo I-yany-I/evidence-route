@@ -110,6 +110,25 @@ class CollaborationPattern(ABC):
         return 0
 
     # ------------------------------------------------------------------ 事实
+    def _record_facts(self, agent_id: str, task: str, content: str) -> None:
+        """把一次核查结果写入共享事实库（从文本推断判定词）。
+
+        verdict 推断为启发式：按「证据不足→反对→支持→存疑」顺序匹配关键词，
+        都未命中时默认「存疑」。evidence 截断 500 字符防事实库膨胀。
+        """
+        verdict = "存疑"
+        for word in ("证据不足", "反对", "支持", "存疑"):
+            if word in content:
+                verdict = word
+                break
+        self.memory.record_fact(Fact(
+            claim=task,
+            verdict=verdict,
+            evidence=(content or "").strip()[:500],
+            sources=[],
+            by=agent_id,
+        ))
+
     def _facts_summary(self) -> str:
         """把共享事实库摘要成文本（供 supervisor/judge 决策使用）。"""
         facts = self.memory.facts()

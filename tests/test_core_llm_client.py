@@ -16,7 +16,7 @@ from agent_collab.core import LLMClient, LLMConfig, LLMError, load_llm_config
 # Fake openai SDK：client.chat.completions.create(**kwargs)
 # ---------------------------------------------------------------------------
 
-def make_response(content=None, tool_calls=None):
+def make_response(content=None, tool_calls=None, usage=None):
     """构造一个形如 openai SDK ChatCompletion 的假对象。"""
     if tool_calls:
         tcs = [
@@ -26,7 +26,8 @@ def make_response(content=None, tool_calls=None):
         message = SimpleNamespace(content=content, tool_calls=tcs)
     else:
         message = SimpleNamespace(content=content, tool_calls=None)
-    return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+    usage_obj = SimpleNamespace(total_tokens=usage) if usage is not None else None
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage_obj)
 
 
 class FakeCompletions:
@@ -168,6 +169,13 @@ def test_complete_passes_tools_and_max_tokens():
     call = client._client.chat.completions.calls[0]  # noqa: SLF001
     assert call["tools"] == tools
     assert call["max_tokens"] == 64
+
+
+def test_complete_passes_usage_through():
+    """SDK 响应带 usage 时透传 total_tokens（供 patterns token 计量）。"""
+    client = make_client([make_response(content="ok", usage=1234)])
+    result = client.complete([{"role": "user", "content": "q"}])
+    assert result["usage"] == {"total_tokens": 1234}
 
 
 def test_complete_parses_tool_calls_arguments():

@@ -163,7 +163,9 @@ def test_parallel_facts_merged_from_worker_memories():
     result = asyncio.run(pattern.run("q"))
 
     claims = {f.claim for f in result.facts}
-    assert claims == {"事实A", "事实B"}
+    # 既合并 worker 各自记忆里的事实，也自动记录每个子任务的核查结果
+    assert {"事实A", "事实B"} <= claims
+    assert {"t0", "t1"} <= claims
 
 
 # ---------------------------------------------------------------------------
