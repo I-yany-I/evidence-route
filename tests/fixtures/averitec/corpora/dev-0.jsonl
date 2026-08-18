@@ -1,0 +1,3 @@
+{"evidence_id":"av:dev:0:0:0","title":"CNET","source_url":"https://example.org/cnet","text":"Sean Connery never sent the letter to Steve Jobs.","snapshot_sha256":"af8d57e93c505021555d897012459ae99d431567fe2371959b4d28ed6d9caa6f"}
+{"evidence_id":"av:dev:0:1:0","title":"Archive","source_url":"https://example.org/archive","text":"Scoopertino describes itself as an imaginary Apple news organization.","snapshot_sha256":"6b30386ce4f5626b8a73c5aa42c7093f4ff78f3e048734e5fc5298e60484eb75"}
+{"evidence_id":"av:dev:0:2:0","title":"Other","source_url":"https://example.org/other","text":"The actor appeared in several advertisements.","snapshot_sha256":"43881d59e698035c723df6cf4e15a8bf8d6f337e37fdeeee396b1e796a2035d7"}
