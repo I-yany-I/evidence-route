@@ -437,7 +437,11 @@ class SQLiteRunStore:
             return {
                 "state": row["state"],
                 "payload": json.loads(row["payload_json"]) if row["payload_json"] else None,
-                "usage": Usage.model_validate_json(row["usage_json"]) if row["usage_json"] else None,
+                "usage": (
+                    Usage.model_validate_json(row["usage_json"])
+                    if row["usage_json"]
+                    else None
+                ),
                 "actual_cost_micro_cny": row["actual_micro_cny"],
                 "requested_alias": row["requested_alias"],
                 "response_model_id_raw": row["response_model_id_raw"],
@@ -550,4 +554,83 @@ class SQLiteRunStore:
             usage_sources=usage_sources,
             identity_verified=bool(identity_values) and all(identity_values),
             billing_uncertain=billing_uncertain,
+        )
+
+    def summarize_activity(self) -> RunCallSummary:
+        """Aggregate every persisted call for this activity.
+
+        Calibration, dev and stability deliberately share one ledger.  This method mirrors
+        ``summarize_run`` while grouping over all run IDs, so reopening a campaign cannot reset
+        the budget accounting at a phase boundary.
+        """
+
+        connection = self._connect()
+        try:
+            run_ids = [
+                row["run_id"]
+                for row in connection.execute(
+                    "SELECT DISTINCT run_id FROM calls WHERE activity_id = ? ORDER BY run_id",
+                    (self.activity_id,),
+                ).fetchall()
+            ]
+        finally:
+            connection.close()
+        summaries = [self.summarize_run(run_id) for run_id in run_ids]
+        if not summaries:
+            return RunCallSummary(
+                call_ids=[],
+                usage=Usage(input_tokens=0, output_tokens=0, total_tokens=0, complete=True),
+                actual_cost_micro_cny=0,
+                known_actual_cost_micro_cny=0,
+                committed_cost_micro_cny=0,
+                cost_is_lower_bound=False,
+                fresh_call_count=0,
+                cache_hit_count=0,
+                transport_attempts=0,
+                requested_aliases=[],
+                response_model_ids_raw=[],
+                usage_sources=[],
+                identity_verified=False,
+                billing_uncertain=False,
+            )
+        input_tokens = sum(item.usage.input_tokens for item in summaries)
+        output_tokens = sum(item.usage.output_tokens for item in summaries)
+        total_tokens = sum(item.usage.total_tokens for item in summaries)
+        complete = all(item.usage.complete for item in summaries)
+        known = sum(item.known_actual_cost_micro_cny for item in summaries)
+        committed = sum(item.committed_cost_micro_cny for item in summaries)
+        exact = complete and all(item.actual_cost_micro_cny is not None for item in summaries)
+        aliases: list[str] = []
+        model_ids: list[str] = []
+        usage_sources: list[Literal["provider", "missing"]] = []
+        call_ids: list[str] = []
+        for item in summaries:
+            call_ids.extend(item.call_ids)
+            usage_sources.extend(item.usage_sources)
+            for alias in item.requested_aliases:
+                if alias not in aliases:
+                    aliases.append(alias)
+            for model_id in item.response_model_ids_raw:
+                if model_id not in model_ids:
+                    model_ids.append(model_id)
+        return RunCallSummary(
+            call_ids=call_ids,
+            usage=Usage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                complete=complete,
+            ),
+            actual_cost_micro_cny=known if exact else None,
+            known_actual_cost_micro_cny=known,
+            committed_cost_micro_cny=committed,
+            cost_is_lower_bound=not exact,
+            fresh_call_count=sum(item.fresh_call_count for item in summaries),
+            cache_hit_count=sum(item.cache_hit_count for item in summaries),
+            transport_attempts=sum(item.transport_attempts for item in summaries),
+            requested_aliases=aliases,
+            response_model_ids_raw=model_ids,
+            usage_sources=usage_sources,
+            identity_verified=all(item.identity_verified for item in summaries),
+            billing_uncertain=any(item.billing_uncertain for item in summaries),
         )

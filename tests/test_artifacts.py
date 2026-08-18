@@ -260,3 +260,24 @@ def test_atomic_json_replaces_complete_file(tmp_path: Path) -> None:
     atomic_write_json(path, {"status": "completed"})
     assert json.loads(path.read_text(encoding="utf-8")) == {"status": "completed"}
     assert not path.with_suffix(".json.tmp").exists()
+
+
+def test_activity_summary_carries_cost_across_runs(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    reserve(store, "call-a", run_id="calibration-0")
+    store.mark_sent("call-a")
+    usage = Usage(input_tokens=8, output_tokens=2, total_tokens=10, complete=True)
+    store.complete_call(
+        "call-a",
+        request_sha256="a" * 64,
+        payload={"content": "ok"},
+        usage=usage,
+        usage_source="provider",
+        requested_alias="alias",
+        response_model_id_raw="relay-a",
+        identity_verified=False,
+    )
+    reopened = make_store(tmp_path)
+    summary = reopened.summarize_activity()
+    assert summary.actual_cost_micro_cny == 10
+    assert summary.call_ids == ["call-a"]
