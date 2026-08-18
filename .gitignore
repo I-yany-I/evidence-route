@@ -19,6 +19,7 @@ venv/
 artifacts/
 eval/report.md.tmp
 *.log
+.worktrees/
 
 # 本地配置与密钥
 config/llm.yaml
