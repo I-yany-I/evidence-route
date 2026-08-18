@@ -1,0 +1,7 @@
+third_party/averitec/paper/eval.py -text
+third_party/averitec/paper/utils.py -text
+third_party/averitec/shared_task/evaluate_veracity.py -text
+third_party/averitec/paper/leven.py text eol=lf
+third_party/averitec/paper/eval.py whitespace=-trailing-space
+third_party/averitec/paper/utils.py whitespace=-trailing-space
+third_party/averitec/shared_task/evaluate_veracity.py whitespace=-trailing-space

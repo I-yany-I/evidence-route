@@ -1,0 +1,36 @@
+{
+  "dataset": "AVeriTeC",
+  "license": "CC BY-NC 4.0",
+  "citation": "Schlichtkrull et al., AVeriTeC, NeurIPS 2023 Datasets and Benchmarks",
+  "sources": [
+    {
+      "path": "paper/eval.py",
+      "url": "https://raw.githubusercontent.com/MichSchli/AVeriTeC/7c62d1ec8df3fb560d6efe2b85fa191135636f81/eval.py",
+      "revision": "7c62d1ec8df3fb560d6efe2b85fa191135636f81",
+      "sha256": "01e325e5e19074037d1f1a7673b0f7999ecab82ee5ae3e81205efc86cc39b161",
+      "license": "CC BY-NC 4.0"
+    },
+    {
+      "path": "paper/utils.py",
+      "url": "https://raw.githubusercontent.com/MichSchli/AVeriTeC/7c62d1ec8df3fb560d6efe2b85fa191135636f81/utils.py",
+      "revision": "7c62d1ec8df3fb560d6efe2b85fa191135636f81",
+      "sha256": "d4b1bcbd0ec10210892e5d41521ffd6a0ae02e50ba336b8d84830f19dc33643e",
+      "license": "CC BY-NC 4.0"
+    },
+    {
+      "path": "shared_task/evaluate_veracity.py",
+      "url": "https://huggingface.co/chenxwh/AVeriTeC/resolve/2ca9dee23a2a6fa64c5bd918e0cd28ed0aa09031/src/prediction/evaluate_veracity.py",
+      "revision": "2ca9dee23a2a6fa64c5bd918e0cd28ed0aa09031",
+      "sha256": "b0683b2f31f5b6ec06628e31d1c55132ffb4787f7341cf14d98411c29882ed70",
+      "license": "CC BY-NC 4.0"
+    },
+    {
+      "path": "paper/leven.py",
+      "url": null,
+      "revision": "project-owned",
+      "sha256": "450f3ecb0219a54dad66cb0ad7ad56edd2f0b74c55169f97730c319a5d734b42",
+      "license": "MIT",
+      "project_owned_compatibility_shim": true
+    }
+  ]
+}
