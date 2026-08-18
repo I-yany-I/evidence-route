@@ -1,0 +1,36 @@
+{
+  "dataset": "AVeriTeC",
+  "license": "CC BY-NC 4.0",
+  "huggingface_repo": "chenxwh/AVeriTeC",
+  "huggingface_revision": "2ca9dee23a2a6fa64c5bd918e0cd28ed0aa09031",
+  "paper_repository": "https://github.com/MichSchli/AVeriTeC",
+  "paper_commit": "7c62d1ec8df3fb560d6efe2b85fa191135636f81",
+  "metadata": {
+    "data/train.json": {
+      "sha256": "ae5eda7c42ddf1695ef185a7ba1bc716928f5adf57103e4f78aae5f9afe00f9c",
+      "size": 10184813
+    },
+    "data/dev.json": {
+      "sha256": "499793726b4a5406780928a3d9dedc48d6dd53de778f22437d129cacdb08e300",
+      "size": 1785475
+    }
+  },
+  "knowledge_store": {
+    "data_store/knowledge_store/dev_knowledge_store.zip": {
+      "lfs_oid_sha256": "021e258cd6fb5fe6d627a4667d663e95c184c966939c15124df9206142fc2212",
+      "size": 11537899362
+    },
+    "data_store/knowledge_store/train/train_0_999.zip": {
+      "lfs_oid_sha256": "389d2284c5f25410205ec530c2101c3e6d575eae460731e1909ad19192dcb810",
+      "size": 20730339734
+    },
+    "data_store/knowledge_store/train/train_1000_1999.zip": {
+      "lfs_oid_sha256": "e2bf5c1dccc855cf3474ccd3f14678fe60f21e6c69685a34d7bc884996fec446",
+      "size": 21273604733
+    },
+    "data_store/knowledge_store/train/train_2000_3067.zip": {
+      "lfs_oid_sha256": "d3e27cc4072cd085dbac44272f1ea918dd3ff970b39d94f143e40c51bbde43d0",
+      "size": 21520772573
+    }
+  }
+}

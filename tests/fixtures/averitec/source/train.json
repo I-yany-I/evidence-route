@@ -1,0 +1,10 @@
+[
+  {"claim":"train-0","label":"Supported","questions":[],"justification":"j0","claim_types":[]},
+  {"claim":"train-1","label":"Refuted","questions":[],"justification":"j1","claim_types":[]},
+  {"claim":"train-2","label":"Not Enough Evidence","questions":[],"justification":"j2","claim_types":[]},
+  {"claim":"train-3","label":"Conflicting Evidence/Cherrypicking","questions":[],"justification":"j3","claim_types":[]},
+  {"claim":"train-4","label":"Supported","questions":[],"justification":"j4","claim_types":[]},
+  {"claim":"train-5","label":"Refuted","questions":[],"justification":"j5","claim_types":[]},
+  {"claim":"train-6","label":"Not Enough Evidence","questions":[],"justification":"j6","claim_types":[]},
+  {"claim":"train-7","label":"Conflicting Evidence/Cherrypicking","questions":[],"justification":"j7","claim_types":[]}
+]
