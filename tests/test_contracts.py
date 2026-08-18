@@ -8,8 +8,8 @@ from evidence_route.contracts import (
     ResultStatus,
     Usage,
     Verdict,
-    VerificationTask,
     VerificationResult,
+    VerificationTask,
     WorkerResult,
 )
 

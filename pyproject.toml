@@ -46,6 +46,11 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q"
 asyncio_mode = "auto"
+markers = [
+  "network: requires external network access",
+  "live: requires configured live provider credentials",
+  "paid: may incur provider charges",
+]
 
 [tool.ruff]
 line-length = 100

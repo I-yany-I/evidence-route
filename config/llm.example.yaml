@@ -1,8 +1,0 @@
-# LLM 配置模板（提交用示例）：复制为 config/llm.yaml 并填写真实值。
-# api_key 支持两种写法：直接写 key，或以 $ 开头写环境变量名（从环境读取）。
-base_url: https://api.ssstoken.net
-api_key: $VISION_API_KEY
-model: gpt-5.5
-temperature: 0.2
-timeout_s: 120.0
-max_retries: 3
