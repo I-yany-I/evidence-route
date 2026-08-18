@@ -405,7 +405,10 @@ def _parse_jsonl_member(payload: bytes, *, member_name: str) -> list[dict[str, o
     except UnicodeDecodeError as exc:
         raise ValueError(f"archive member is not UTF-8: {member_name}") from exc
     rows: list[dict[str, object]] = []
-    for line_number, line in enumerate(text.splitlines(), start=1):
+    # Split only on the JSONL newline. ``str.splitlines`` also treats U+2028
+    # and U+2029 as boundaries, but those code points may occur inside a JSON
+    # string from a scraped page.
+    for line_number, line in enumerate(text.split("\n"), start=1):
         if not line.strip():
             continue
         try:
