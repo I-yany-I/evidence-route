@@ -39,63 +39,93 @@ def _is_symlink(info: zipfile.ZipInfo) -> bool:
     return stat.S_ISLNK(mode)
 
 
+def _extract_zip_into(
+    archive_path: Path | str,
+    output_root: Path | str,
+    *,
+    max_member_bytes: int = DEFAULT_MAX_MEMBER_BYTES,
+) -> None:
+    """Extract into an owned staging tree after validating every ZIP member."""
+
+    archive_path = Path(archive_path)
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    seen: set[Path] = set()
+    with zipfile.ZipFile(archive_path) as archive:
+        entries: list[tuple[zipfile.ZipInfo, Path]] = []
+        for info in archive.infolist():
+            relative = safe_member_path(info.filename)
+            if relative in seen:
+                raise ValueError(f"duplicate ZIP member: {info.filename}")
+            seen.add(relative)
+            if _is_symlink(info):
+                raise ValueError(f"symlink ZIP member is not allowed: {info.filename}")
+            destination = (output_root / relative).resolve()
+            try:
+                destination.relative_to(output_root.resolve())
+            except ValueError as exc:
+                raise ValueError(f"unsafe ZIP member: {info.filename!r}") from exc
+            if info.file_size > max_member_bytes:
+                raise ValueError(f"ZIP member exceeds size limit: {info.filename}")
+            entries.append((info, relative))
+
+        for info, relative in entries:
+            destination = (output_root / relative).resolve()
+            if info.is_dir() or info.filename.endswith(("/", "\\")):
+                if destination.exists() and not destination.is_dir():
+                    raise ValueError(f"duplicate ZIP member: {info.filename}")
+                destination.mkdir(parents=True, exist_ok=True)
+                continue
+            if destination.exists():
+                raise ValueError(f"duplicate ZIP member: {info.filename}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            written = 0
+            with archive.open(info, "r") as source, destination.open("wb") as target:
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > max_member_bytes:
+                        raise ValueError(f"ZIP member exceeds size limit: {info.filename}")
+                    target.write(chunk)
+            if written != info.file_size:
+                raise ValueError(f"ZIP member size mismatch: {info.filename}")
+
+
 def extract_checked_zip(
     archive_path: Path | str,
     output_root: Path | str,
     *,
     max_member_bytes: int = DEFAULT_MAX_MEMBER_BYTES,
 ) -> None:
-    """Extract a ZIP after validating every member path, size, type and CRC."""
+    """Extract a ZIP atomically, never deleting a pre-existing caller directory."""
 
     archive_path = Path(archive_path)
     output_root = Path(output_root)
-    output_root.mkdir(parents=True, exist_ok=True)
-    seen: set[Path] = set()
+    if output_root.exists():
+        raise FileExistsError(f"extraction output already exists: {output_root}")
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=f".{output_root.name}-", dir=output_root.parent))
     try:
-        with zipfile.ZipFile(archive_path) as archive:
-            for info in archive.infolist():
-                relative = safe_member_path(info.filename)
-                if relative in seen:
-                    raise ValueError(f"duplicate ZIP member: {info.filename}")
-                seen.add(relative)
-                if _is_symlink(info):
-                    raise ValueError(f"symlink ZIP member is not allowed: {info.filename}")
-                if info.is_dir() or info.filename.endswith(("/", "\\")):
-                    (output_root / relative).mkdir(parents=True, exist_ok=True)
-                    continue
-                if info.file_size > max_member_bytes:
-                    raise ValueError(f"ZIP member exceeds size limit: {info.filename}")
-                destination = (output_root / relative).resolve()
-                try:
-                    destination.relative_to(output_root.resolve())
-                except ValueError as exc:
-                    raise ValueError(f"unsafe ZIP member: {info.filename!r}") from exc
-                if destination.exists():
-                    raise ValueError(f"duplicate ZIP member: {info.filename}")
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                written = 0
-                with archive.open(info, "r") as source, destination.open("wb") as target:
-                    while True:
-                        chunk = source.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        written += len(chunk)
-                        if written > max_member_bytes:
-                            raise ValueError(f"ZIP member exceeds size limit: {info.filename}")
-                        target.write(chunk)
-                if written != info.file_size:
-                    raise ValueError(f"ZIP member size mismatch: {info.filename}")
+        _extract_zip_into(archive_path, stage, max_member_bytes=max_member_bytes)
+        os.replace(stage, output_root)
     except Exception:
-        shutil.rmtree(output_root, ignore_errors=True)
+        shutil.rmtree(stage, ignore_errors=True)
         raise
 
 
 def tree_sha256(root: Path | str) -> str:
-    """Hash extracted files in sorted relative-path order."""
+    """Hash extracted files in sorted relative-path order (excluding the receipt)."""
 
     root = Path(root)
     digest = hashlib.sha256()
-    files = (item for item in root.rglob("*") if item.is_file())
+    files = (
+        item
+        for item in root.rglob("*")
+        if item.is_file()
+        and item.relative_to(root).as_posix() != "PREPARATION_RECEIPT.json"
+    )
     for path in sorted(files, key=lambda p: p.as_posix()):
         relative = path.relative_to(root).as_posix().encode("utf-8")
         payload = path.read_bytes()
@@ -116,8 +146,12 @@ def _read_spec(path: Path) -> dict[str, object]:
     repository = payload.get("repository")
     commit = payload.get("commit")
     files = payload.get("files")
-    if not isinstance(repository, str) or not repository or not isinstance(commit, str):
-        raise ValueError("NLTK source spec requires repository and commit")
+    if not isinstance(repository, str) or not re.fullmatch(
+        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository
+    ):
+        raise ValueError("NLTK source spec requires a repository owner/name")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("NLTK commit must be a 40-character lowercase SHA-1")
     if not isinstance(files, dict) or not files:
         raise ValueError("NLTK source spec requires files")
     for relative, metadata in files.items():
@@ -169,7 +203,71 @@ def _extract_package(
         ]
     rooted = bool(members) and all(path.parts[0] == package_name for path in members)
     target = category_root if rooted else category_root / package_name
-    extract_checked_zip(archive_path, target, max_member_bytes=max_member_bytes)
+    _extract_zip_into(archive_path, target, max_member_bytes=max_member_bytes)
+
+
+def _receipt_matches(
+    output_root: Path,
+    spec: dict[str, object],
+) -> dict[str, object] | None:
+    """Validate an existing installation before allowing an idempotent reuse."""
+
+    receipt_path = output_root / "PREPARATION_RECEIPT.json"
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(receipt, dict):
+        return None
+    if (
+        receipt.get("schema_version") != "1"
+        or receipt.get("repository") != spec.get("repository")
+        or receipt.get("commit") != spec.get("commit")
+    ):
+        return None
+    expected_files = spec.get("files")
+    actual_files = receipt.get("files")
+    if not isinstance(expected_files, dict) or not isinstance(actual_files, dict):
+        return None
+    if set(expected_files) != set(actual_files):
+        return None
+    repository = str(spec["repository"])
+    commit = str(spec["commit"])
+    for relative, metadata in expected_files.items():
+        if not isinstance(metadata, dict) or not isinstance(actual_files.get(relative), dict):
+            return None
+        actual = actual_files[relative]
+        expected_url = f"https://raw.githubusercontent.com/{repository}/{commit}/{relative}"
+        if (
+            actual.get("size") != metadata.get("size")
+            or actual.get("sha256") != metadata.get("sha256")
+            or actual.get("url") != expected_url
+        ):
+            return None
+    recorded_tree = receipt.get("extracted_tree_sha256")
+    if not isinstance(recorded_tree, str) or recorded_tree != tree_sha256(output_root):
+        return None
+    return receipt
+
+
+def _install_stage(stage: Path, output_root: Path, *, force: bool) -> None:
+    """Swap a fully prepared tree into place, retaining a rollback directory until done."""
+
+    if not output_root.exists():
+        os.replace(stage, output_root)
+        return
+    if not force:
+        raise FileExistsError(f"output root already exists: {output_root}")
+    backup = output_root.with_name(f".{output_root.name}.backup-{os.getpid()}")
+    if backup.exists():
+        raise FileExistsError(f"stale NLTK backup exists: {backup}")
+    os.replace(output_root, backup)
+    try:
+        os.replace(stage, output_root)
+    except Exception:
+        os.replace(backup, output_root)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
 
 
 def prepare_from_spec(
@@ -190,18 +288,12 @@ def prepare_from_spec(
     commit = str(spec["commit"])
     files = spec["files"]
     assert isinstance(files, dict)
-    receipt_path = output_root / "PREPARATION_RECEIPT.json"
     if output_root.exists():
-        if not force and receipt_path.is_file():
-            try:
-                existing = json.loads(receipt_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                existing = None
-            if isinstance(existing, dict) and existing.get("commit") == commit:
-                return existing
-        if not force:
-            raise FileExistsError(f"output root already exists: {output_root}")
-        shutil.rmtree(output_root)
+        existing = _receipt_matches(output_root, spec)
+        if existing is not None and not force:
+            return existing
+        if existing is None and not force:
+            raise ValueError(f"existing NLTK output failed integrity: {output_root}")
 
     fetcher = fetch or (lambda url: _download(url, timeout_s=timeout_s))
     stage_parent = output_root.parent
@@ -248,11 +340,11 @@ def prepare_from_spec(
             "files": downloaded,
             "extracted_tree_sha256": extracted_digest,
         }
-        os.replace(stage, output_root)
-        receipt_path = output_root / "PREPARATION_RECEIPT.json"
+        receipt_path = stage / "PREPARATION_RECEIPT.json"
         temporary = receipt_path.with_name(f".{receipt_path.name}.tmp")
         temporary.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         os.replace(temporary, receipt_path)
+        _install_stage(stage, output_root, force=force)
         return receipt
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)

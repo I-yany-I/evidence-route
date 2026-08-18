@@ -1,3 +1,5 @@
+import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -125,6 +127,26 @@ def test_missing_result_is_omitted_without_reordering(completed_results, aligned
 def test_out_of_order_results_are_rejected(completed_results, aligned_claims) -> None:
     with pytest.raises(ValueError, match="manifest order"):
         select_completed_triples(aligned_claims, list(reversed(completed_results)))
+
+
+def test_source_verifier_requires_complete_provenance_manifest(tmp_path: Path) -> None:
+    source_root = Path("third_party/averitec")
+    target_root = tmp_path / "averitec"
+    for relative in (
+        "paper/eval.py",
+        "paper/utils.py",
+        "paper/leven.py",
+        "shared_task/evaluate_veracity.py",
+    ):
+        destination = target_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_root / relative, destination)
+    spec = json.loads((source_root / "SOURCES.json").read_text(encoding="utf-8"))
+    spec["sources"] = spec["sources"][:-1]
+    reduced = target_root / "SOURCES.json"
+    reduced.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(ValueError, match="complete|expected"):
+        verify_evaluator_sources(reduced)
 
 
 def test_runner_resolves_relative_artifacts_before_changing_cwd(

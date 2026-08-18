@@ -17,6 +17,33 @@ from evidence_route.contracts import ResultStatus, VerificationResult
 from evidence_route.evaluation.runtime_manifest import RuntimeClaim
 from evidence_route.evaluation.scorer_manifest import GoldClaim
 
+_EXPECTED_SOURCE_METADATA: dict[str, dict[str, object]] = {
+    "paper/eval.py": {
+        "revision": "7c62d1ec8df3fb560d6efe2b85fa191135636f81",
+        "url": "https://raw.githubusercontent.com/MichSchli/AVeriTeC/7c62d1ec8df3fb560d6efe2b85fa191135636f81/eval.py",
+        "license": "CC BY-NC 4.0",
+        "project_owned_compatibility_shim": False,
+    },
+    "paper/utils.py": {
+        "revision": "7c62d1ec8df3fb560d6efe2b85fa191135636f81",
+        "url": "https://raw.githubusercontent.com/MichSchli/AVeriTeC/7c62d1ec8df3fb560d6efe2b85fa191135636f81/utils.py",
+        "license": "CC BY-NC 4.0",
+        "project_owned_compatibility_shim": False,
+    },
+    "shared_task/evaluate_veracity.py": {
+        "revision": "2ca9dee23a2a6fa64c5bd918e0cd28ed0aa09031",
+        "url": "https://huggingface.co/chenxwh/AVeriTeC/resolve/2ca9dee23a2a6fa64c5bd918e0cd28ed0aa09031/src/prediction/evaluate_veracity.py",
+        "license": "CC BY-NC 4.0",
+        "project_owned_compatibility_shim": False,
+    },
+    "paper/leven.py": {
+        "revision": "project-owned",
+        "url": None,
+        "license": "MIT",
+        "project_owned_compatibility_shim": True,
+    },
+}
+
 
 @dataclass(frozen=True)
 class CompletedTriple:
@@ -89,6 +116,24 @@ def verify_evaluator_sources(source_spec_path: Path | str) -> dict[str, str]:
         raise ValueError("evaluator source spec must declare the AVeriTeC license")
     if not isinstance(source_spec.get("citation"), str) or not source_spec["citation"].strip():
         raise ValueError("evaluator source spec must declare a citation")
+    entries = source_spec.get("sources")
+    if not isinstance(entries, list):
+        raise ValueError("evaluator source spec must contain a complete sources list")
+    entry_by_path: dict[str, dict[str, object]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            raise ValueError("evaluator source entries must contain a path")
+        path = entry["path"]
+        if path in entry_by_path:
+            raise ValueError(f"duplicate evaluator source entry: {path}")
+        entry_by_path[path] = entry
+    if set(entry_by_path) != set(_EXPECTED_SOURCE_METADATA):
+        raise ValueError("evaluator source spec does not contain the complete expected sources")
+    for path, expected in _EXPECTED_SOURCE_METADATA.items():
+        entry = entry_by_path[path]
+        for key, value in expected.items():
+            if entry.get(key) != value:
+                raise ValueError(f"evaluator source provenance mismatch: {path}:{key}")
 
     root = spec_path.parent.resolve()
     found = False
