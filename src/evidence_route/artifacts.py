@@ -281,6 +281,24 @@ class SQLiteRunStore:
     def mark_sent(self, call_id: str) -> None:
         self._transition(call_id, CallState.RESERVED, CallState.SENT, increment_transport=True)
 
+    def mark_transport_retry(self, call_id: str) -> None:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                """UPDATE calls SET transport_attempts = transport_attempts + 1,
+                    updated_at = ? WHERE call_id = ? AND state = 'sent'""",
+                (_timestamp(), call_id),
+            ).rowcount
+            if updated != 1:
+                raise BillingStateError("only a sent call can record a transport retry")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def mark_retryable_not_billed(self, call_id: str) -> None:
         self._transition(call_id, CallState.SENT, CallState.RESERVED)
 
@@ -406,6 +424,28 @@ class SQLiteRunStore:
         except Exception:
             connection.rollback()
             raise
+        finally:
+            connection.close()
+
+    def get_call_metadata(self, call_id: str) -> dict[str, object] | None:
+        """Return persisted call metadata for adapter cache hits."""
+        connection = self._connect()
+        try:
+            row = connection.execute("SELECT * FROM calls WHERE call_id = ?", (call_id,)).fetchone()
+            if row is None:
+                return None
+            return {
+                "state": row["state"],
+                "payload": json.loads(row["payload_json"]) if row["payload_json"] else None,
+                "usage": Usage.model_validate_json(row["usage_json"]) if row["usage_json"] else None,
+                "actual_cost_micro_cny": row["actual_micro_cny"],
+                "requested_alias": row["requested_alias"],
+                "response_model_id_raw": row["response_model_id_raw"],
+                "identity_verified": bool(row["identity_verified"]),
+                "usage_source": row["usage_source"],
+                "transport_attempts": row["transport_attempts"],
+                "cache_hits": row["cache_hits"],
+            }
         finally:
             connection.close()
 
