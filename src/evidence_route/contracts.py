@@ -116,7 +116,7 @@ class DecompositionDraft(StrictModel):
     tasks: list[VerificationTask] = Field(min_length=1, max_length=3)
 
     @model_validator(mode="after")
-    def validate_unique_tasks(self) -> "DecompositionDraft":
+    def validate_unique_tasks(self) -> DecompositionDraft:
         task_ids = [task.task_id for task in self.tasks]
         if len(task_ids) != len(set(task_ids)):
             raise ValueError("decomposition task ids must be unique")
@@ -202,18 +202,32 @@ class VerificationResult(StrictModel):
         return self
 
 
+class NodeTiming(StrictModel):
+    node: str
+    started_at: str
+    finished_at: str
+    latency_ms: int = Field(ge=0)
+    cache_hit: bool = False
+
+
 class VerificationState(TypedDict, total=False):
     run_id: str
     claim_id: str
     claim_text: str
     language: str
     strategy: Strategy
+    status: RunStatus
     probe_evidence: list[Evidence]
     claim_features: ClaimFeatures
     route_decision: RouteDecision
     tasks: list[VerificationTask]
     worker_results: Annotated[list[WorkerResult], operator.add]
     draft_result: VerificationResult
+    draft_origin: Literal["single", "multi"]
+    validation_action: Literal["accept", "escalate", "fail"]
+    node_timings: Annotated[list[NodeTiming], operator.add]
+    escalated: bool
+    usage: Usage
     final_result: VerificationResult
     escalation_count: int
     errors: Annotated[list[str], operator.add]
