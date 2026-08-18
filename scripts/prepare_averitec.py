@@ -317,7 +317,10 @@ def _validated_member_info(archive: object, member_name: str, allowed: set[str],
     by_name: dict[str, object] = {}
     for info in infos:
         raw_name = _archive_info_name(info)
-        normalised = _normalise_member_path(raw_name)
+        is_directory = raw_name.endswith("/")
+        normalised = _normalise_member_path(raw_name.rstrip("/") if is_directory else raw_name)
+        if is_directory:
+            continue
         if normalised in by_name:
             raise ValueError(f"duplicate archive member: {normalised}")
         by_name[normalised] = info
@@ -959,10 +962,18 @@ def prepare_dataset(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-spec", type=Path, required=True)
-    parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--runtime-manifest-root", type=Path, required=True)
-    parser.add_argument("--scorer-manifest-root", type=Path, required=True)
+    parser.add_argument(
+        "--source-spec", type=Path, default=Path("data/sources/averitec.json")
+    )
+    parser.add_argument(
+        "--output-root", type=Path, default=Path("data/processed/averitec")
+    )
+    parser.add_argument(
+        "--runtime-manifest-root", type=Path, default=Path("data/manifests")
+    )
+    parser.add_argument(
+        "--scorer-manifest-root", type=Path, default=Path("data/scorer_manifests")
+    )
     parser.add_argument("--seed", type=int, default=20260817)
     parser.add_argument("--calibration-per-label", type=int, default=8)
     parser.add_argument("--dev-per-label", type=int, default=20)

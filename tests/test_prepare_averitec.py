@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from scripts.prepare_averitec import (
+    build_parser,
     normalize_member,
     prepare_dataset,
     select_balanced_ids,
@@ -19,6 +20,14 @@ LABELS = [
     "Supported", "Refuted", "Not Enough Evidence",
     "Conflicting Evidence/Cherrypicking",
 ]
+
+
+def test_prepare_cli_uses_registered_default_paths() -> None:
+    args = build_parser().parse_args([])
+    assert args.source_spec == Path("data/sources/averitec.json")
+    assert args.output_root == Path("data/processed/averitec")
+    assert args.runtime_manifest_root == Path("data/manifests")
+    assert args.scorer_manifest_root == Path("data/scorer_manifests")
 
 
 def test_balanced_ids_are_hash_stable() -> None:
@@ -107,6 +116,21 @@ def test_member_guard_rejects_duplicate_and_traversal_entries() -> None:
         )
 
 
+def test_member_guard_allows_benign_directory_entries() -> None:
+    archive = FakeRemoteZip()
+    archive.add("output_dev/")
+    archive.add("output_dev/7.json", payload=b"x")
+    assert (
+        stream_selected_member(
+            archive,
+            "output_dev/7.json",
+            allowed={"output_dev/7.json"},
+            max_uncompressed_bytes=100,
+        )
+        == b"x"
+    )
+
+
 def test_stability_selection_uses_selected_dev_ids_only() -> None:
     rows = json.loads(Path("tests/fixtures/averitec/source/dev.json").read_text("utf-8"))
     selected = select_balanced_ids(rows, split="dev", per_label=1, seed=20260817)
@@ -193,8 +217,10 @@ def test_prepare_dataset_writes_aligned_manifests_with_fake_archives(tmp_path: P
         return archive
 
     def fetcher(url: str, timeout: float) -> bytes:
-        del url, timeout
+        del timeout
         assert not (tmp_path / "manifests").exists()
+        assert "/test/repo/raw/" in url
+        assert "/datasets/" not in url
         return (
             "version https://git-lfs.github.com/spec/v1\n"
             f"oid sha256:{'b' * 64}\nsize 1\n"
