@@ -20,6 +20,10 @@ artifacts/
 eval/report.md.tmp
 *.log
 .worktrees/
+data/external/
+data/processed/
+configs/pricing.local.yaml
+*.sqlite3
 
 # 本地配置与密钥
 config/llm.yaml

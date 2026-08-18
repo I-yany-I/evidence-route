@@ -1,15 +1,42 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=82.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-collab"
+name = "evidence-route"
 version = "0.1.0"
-description = "AgentCollab - 微型多智能体协作框架（4 种协作模式 + 消息协议 + 共享记忆 + MCP + 审计）"
+description = "Cost-aware adaptive fact verification with LangGraph"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
-dependencies = []
+license = "MIT"
+dependencies = [
+  "langgraph==1.2.11",
+  "langgraph-checkpoint-sqlite==3.1.1",
+  "numpy==2.4.6",
+  "openai==3.1.0",
+  "pydantic==2.13.4",
+  "PyYAML==6.0.3",
+  "rank-bm25==0.2.2",
+  "remotezip==0.12.3",
+  "rich==15.0.0",
+  "typer==0.27.1",
+]
+
+[project.optional-dependencies]
+eval = [
+  "nltk==3.10.3",
+  "scikit-learn==1.9.0",
+  "scipy==1.17.1",
+]
+dev = [
+  "pip-tools==7.6.1",
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "ruff==0.16.3",
+]
+
+[project.scripts]
+evidence-route = "evidence_route.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -18,3 +45,11 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q"
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

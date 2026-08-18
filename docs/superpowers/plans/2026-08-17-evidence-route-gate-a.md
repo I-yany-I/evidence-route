@@ -117,7 +117,7 @@ dependencies = [
 eval = [
   "nltk==3.10.3",
   "scikit-learn==1.9.0",
-  "scipy==1.18.0",
+  "scipy==1.17.1",
 ]
 dev = [
   "pip-tools==7.6.1",
