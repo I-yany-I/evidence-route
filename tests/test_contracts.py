@@ -3,10 +3,12 @@ from pydantic import ValidationError
 
 from evidence_route.contracts import (
     Citation,
+    DecompositionDraft,
     Evidence,
     ResultStatus,
     Usage,
     Verdict,
+    VerificationTask,
     VerificationResult,
     WorkerResult,
 )
@@ -114,4 +116,26 @@ def test_models_forbid_unknown_fields() -> None:
             snapshot_sha256="a" * 64,
             ranking_score=1.0,
             gold_label="Refuted",
+        )
+
+
+def test_decomposition_rejects_duplicate_task_ids() -> None:
+    with pytest.raises(ValidationError, match="unique"):
+        DecompositionDraft(
+            tasks=[
+                VerificationTask(task_id="t0", claim_unit_ids=["u0"], query="one"),
+                VerificationTask(task_id="t0", claim_unit_ids=["u1"], query="two"),
+            ]
+        )
+
+
+def test_decomposition_rejects_more_than_three_tasks() -> None:
+    with pytest.raises(ValidationError):
+        DecompositionDraft(
+            tasks=[
+                VerificationTask(task_id="t0", claim_unit_ids=["u0"], query="one"),
+                VerificationTask(task_id="t1", claim_unit_ids=["u1"], query="two"),
+                VerificationTask(task_id="t2", claim_unit_ids=["u2"], query="three"),
+                VerificationTask(task_id="t0", claim_unit_ids=["u3"], query="four"),
+            ]
         )

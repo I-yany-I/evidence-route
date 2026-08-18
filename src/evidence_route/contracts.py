@@ -105,6 +105,31 @@ class VerificationTask(StrictModel):
     query: str = Field(min_length=1)
 
 
+class VerdictDraft(StrictModel):
+    verdict: Verdict
+    confidence: float = Field(ge=0, le=1)
+    rationale: str = Field(min_length=1)
+    citations: list[Citation] = Field(default_factory=list)
+
+
+class DecompositionDraft(StrictModel):
+    tasks: list[VerificationTask] = Field(min_length=1, max_length=3)
+
+    @model_validator(mode="after")
+    def validate_unique_tasks(self) -> "DecompositionDraft":
+        task_ids = [task.task_id for task in self.tasks]
+        if len(task_ids) != len(set(task_ids)):
+            raise ValueError("decomposition task ids must be unique")
+        return self
+
+
+class WorkerDraft(StrictModel):
+    verdict: Verdict
+    confidence: float = Field(ge=0, le=1)
+    citations: list[Citation] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
 class WorkerResult(StrictModel):
     task_id: str
     claim_unit_ids: list[str] = Field(min_length=1)
