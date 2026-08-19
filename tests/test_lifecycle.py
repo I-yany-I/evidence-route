@@ -7,13 +7,20 @@ from pathlib import Path
 
 import pytest
 
-from evidence_route.evaluation.activity import CampaignStatus, FreezeIdentity
+from evidence_route.evaluation.activity import (
+    CampaignStatus,
+    CampaignStopReason,
+    FreezeIdentity,
+)
 from evidence_route.evaluation.lifecycle import (
     ActivityFileError,
     build_freeze_identity,
     build_initial_activity,
     load_activity,
+    link_calibration_artifact,
+    mark_calibration_complete,
     persist_activity,
+    transition_activity_phase,
     verify_current_freeze,
     verify_git_freeze,
 )
@@ -138,6 +145,29 @@ def test_initial_activity_requires_exactly_ordered_unique_cases(tmp_path: Path) 
             calibration_state_sha256="b" * 64,
             case_ids=["a" * 64] * 32,
         )
+
+
+def test_activity_phase_transition_preserves_model_ids_and_stop_reason() -> None:
+    activity = build_initial_activity(
+        activity_id="activity-1",
+        calibration_plan_sha256="a" * 64,
+        calibration_state_sha256="b" * 64,
+        case_ids=[f"{index:064x}" for index in range(32)],
+    )
+    for index, link in enumerate(activity.calibration_artifacts):
+        activity = link_calibration_artifact(
+            activity, case_id=link.case_id, artifact_sha256=f"{index + 1:064x}"
+        )
+    activity = mark_calibration_complete(activity)
+    activity = transition_activity_phase(
+        activity,
+        phase="calibration",
+        status=CampaignStatus.INCOMPLETE_USAGE,
+        stop_reason=CampaignStopReason.USAGE_MISSING,
+        billing_uncertain=False,
+    )
+    assert activity.status is CampaignStatus.INCOMPLETE_USAGE
+    assert activity.stop_reason.value == "usage_missing"
 
 
 def test_verify_git_freeze_requires_clean_worktree_and_ancestor(tmp_path: Path) -> None:
