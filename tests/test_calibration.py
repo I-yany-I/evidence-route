@@ -1,6 +1,7 @@
 import pytest
 
 from evidence_route.config import RoutingSettings, stable_hash
+from evidence_route.contracts import ResultStatus
 from evidence_route.evaluation.calibration import (
     CalibrationRuntimeCase,
     CalibrationScoredCase,
@@ -49,6 +50,38 @@ def test_replay_uses_saved_single_then_multi_on_escalation(
         + calibration_case.runtime.single_result.usage.total_tokens
         + calibration_case.runtime.multi_result.usage.total_tokens
     )
+
+
+def test_replay_revalidates_multi_result_after_single_escalation(
+    calibration_case: CalibrationScoredCase,
+) -> None:
+    """An escalated multi result must satisfy the candidate's validation thresholds."""
+
+    runtime = calibration_case.runtime.model_copy(
+        update={
+            "saved_llm_route": "single",
+            "single_result": calibration_case.runtime.single_result.model_copy(
+                update={"confidence": 0.50}
+            ),
+            "multi_result": calibration_case.runtime.multi_result.model_copy(
+                update={"confidence": 0.50}
+            ),
+        }
+    )
+    outcome = replay_candidate(
+        calibration_case.model_copy(update={"runtime": runtime}),
+        RoutingSettings(
+            clear_multi_clauses=4,
+            clear_single_min_sources=3,
+            low_confidence=0.65,
+            minimum_coverage=1.0,
+        ),
+    )
+
+    assert outcome.executed_path == "single_escalated_multi"
+    assert outcome.final_result.status is ResultStatus.FAILED
+    assert outcome.final_result.failure_stage == "validation"
+    assert "LOW_CONFIDENCE" in outcome.final_result.errors
 
 
 def test_candidate_prefers_token_saving_within_quality_floor() -> None:

@@ -596,6 +596,33 @@ def _case_path(root: Path | str, relative_path: str) -> Path:
     return destination
 
 
+def begin_calibration_case(
+    plan: CalibrationPlan,
+    state: CalibrationState,
+    case_id: str,
+    *,
+    state_path: Path | str | None = None,
+) -> CalibrationWorkItem:
+    """Persist the single RUNNING journal entry before executing its first call."""
+
+    _validate_plan_state(plan, state)
+    index, work = _work_for_case(plan, case_id)
+    running = [item.case_id for item in state.items if item.status is CalibrationItemStatus.RUNNING]
+    if running and running != [case_id]:
+        raise ValueError(f"calibration case {running[0]} is already RUNNING")
+    item = state.items[index]
+    if item.status is CalibrationItemStatus.COMPLETE:
+        raise ValueError("completed calibration cases cannot be started again")
+    if item.status is CalibrationItemStatus.STOPPED:
+        raise ValueError("stopped calibration cases require an explicit recovery decision")
+    item.status = CalibrationItemStatus.RUNNING
+    item.artifact_sha256 = None
+    state.state_sha256 = state_fingerprint(state)
+    if state_path is not None:
+        persist_calibration_state(state_path, state)
+    return work
+
+
 def persist_calibration_case(
     activity_root: Path | str,
     plan: CalibrationPlan,
@@ -845,7 +872,15 @@ def replay_candidate(
         total_tokens = router_tokens + runtime.single_result.usage.total_tokens
         total_cost = router_cost + _result_cost(runtime.single_result)
         if validation_action is ValidationAction.ESCALATE:
-            final_result = runtime.multi_result
+            # The saved multi path still has to pass the candidate's thresholds.  An
+            # escalation consumes the one allowed retry, so validation can only accept
+            # or fail here; it must never silently return an unvalidated result.
+            final_result, _multi_validation_action = _validate_saved_result(
+                runtime.multi_result,
+                runtime,
+                settings,
+                route="multi",
+            )
             executed_path = "single_escalated_multi"
             escalated = True
             total_tokens += runtime.multi_result.usage.total_tokens
@@ -958,6 +993,7 @@ def _score_fixed_baseline(
     cases: Sequence[CalibrationScoredCase],
     *,
     strategy: Literal["always_single", "always_multi"],
+    routing: RoutingSettings,
 ) -> CandidateOutcome:
     if not cases:
         raise ValueError("fixed calibration baseline requires scored cases")
@@ -973,7 +1009,7 @@ def _score_fixed_baseline(
         result, action = _validate_saved_result(
             runtime.single_result if route == "single" else runtime.multi_result,
             runtime,
-            RoutingSettings(),
+            routing,
             route=route,
             strategy=(
                 Strategy.ALWAYS_SINGLE
@@ -1008,7 +1044,10 @@ def _score_fixed_baseline(
         total_tokens += tokens
         total_cost += cost
     metrics = score_full_manifest(gold, results)
-    settings: dict[str, object] = {"strategy": strategy}
+    settings: dict[str, object] = {
+        "strategy": strategy,
+        "routing": routing.model_dump(mode="json"),
+    }
     return CandidateOutcome(
         config_hash=stable_hash(settings),
         macro_f1=metrics.macro_f1,
@@ -1053,6 +1092,7 @@ def build_calibration_replay(
         raise ValueError("calibration gold must contain exactly eight cases of each verdict")
     outcomes = score_candidate_grid(scored)
     selected = choose_candidate(outcomes, tolerance=tolerance)
+    selected_routing = RoutingSettings.model_validate(selected.settings)
     best_macro_f1 = max(item.macro_f1 for item in outcomes)
     return CalibrationReplay(
         activity_id=plan.activity_id,
@@ -1065,10 +1105,14 @@ def build_calibration_replay(
         candidates=outcomes,
         baselines={
             Strategy.ALWAYS_SINGLE.value: _score_fixed_baseline(
-                scored, strategy=Strategy.ALWAYS_SINGLE.value
+                scored,
+                strategy=Strategy.ALWAYS_SINGLE.value,
+                routing=selected_routing,
             ),
             Strategy.ALWAYS_MULTI.value: _score_fixed_baseline(
-                scored, strategy=Strategy.ALWAYS_MULTI.value
+                scored,
+                strategy=Strategy.ALWAYS_MULTI.value,
+                routing=selected_routing,
             ),
         },
         selected=selected,
@@ -1236,6 +1280,7 @@ __all__ = [
     "ReplayDecision",
     "ReplayOutcome",
     "attach_calibration_gold",
+    "begin_calibration_case",
     "build_calibration_plan",
     "build_calibration_replay",
     "build_calibration_runtime_case",

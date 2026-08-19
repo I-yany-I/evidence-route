@@ -10,11 +10,11 @@ from evidence_route.evaluation.calibration import (
     CalibrationItemStatus,
     CalibrationPlan,
     CalibrationReplay,
+    begin_calibration_case,
     build_calibration_plan,
     build_calibration_replay,
     build_calibration_runtime_case,
     build_calibration_state,
-    begin_calibration_case,
     derive_case_id,
     derive_run_id,
     load_calibration_cases,
@@ -290,6 +290,27 @@ def test_fixed_single_baseline_never_uses_adaptive_escalation(calibration_case) 
     single = replay.baselines["always_single"].decisions[0]
     assert single.executed_path == "single_failed"
     assert not single.escalated
+
+
+def test_fixed_baselines_use_selected_validation_thresholds(calibration_case) -> None:
+    plan = _plan()
+    runtime_cases = _runtime_cases(calibration_case, plan)
+    adjusted = []
+    for case in runtime_cases:
+        payload = case.model_dump(mode="json")
+        payload["single_result"]["confidence"] = 0.6
+        payload["artifact_sha256"] = "0" * 64
+        payload["artifact_sha256"] = runtime_case_fingerprint(payload)
+        adjusted.append(type(case).model_validate(payload))
+    scored = [
+        SimpleNamespace(runtime=case, gold_label=list(Verdict)[index % 4])
+        for index, case in enumerate(adjusted)
+    ]
+
+    replay = build_calibration_replay(scored, plan=plan, code_git_sha="2" * 40)
+
+    assert replay.selected.low_confidence == 0.55
+    assert replay.baselines["always_single"].decisions[0].executed_path == "single"
 
 
 def test_replay_requires_balanced_train_gold(calibration_case) -> None:
