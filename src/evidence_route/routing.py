@@ -5,8 +5,11 @@ from typing import Literal
 
 from pydantic import ConfigDict, Field
 
+from evidence_route.artifacts import BillingStateError
+from evidence_route.budget import BudgetExceeded, UsageUnavailable
 from evidence_route.config import GenerationSettings, RoutingSettings, stable_hash
 from evidence_route.contracts import ClaimFeatures, RouteDecision, Strategy, StrictModel
+from evidence_route.llm import BillingUncertain
 
 
 class StructuredCallError(RuntimeError):
@@ -61,6 +64,10 @@ class HybridRouter:
             return self._decision(payload.route, "llm", payload.reason_codes, payload.explanation)
         except Exception as exc:
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            if isinstance(
+                exc, (BudgetExceeded, UsageUnavailable, BillingUncertain, BillingStateError)
+            ):
                 raise
             return self._decision("multi", "fallback", ["router_fallback"])
 

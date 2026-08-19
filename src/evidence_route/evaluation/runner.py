@@ -42,6 +42,10 @@ from evidence_route.evaluation.activity import (
 Executor = Callable[[CampaignWorkItem], Awaitable[RunArtifact | Mapping[str, Any]]]
 
 
+class CampaignProcessInterruption(RuntimeError):
+    """Typed signal for a process-level interruption that is safe to resume."""
+
+
 def compute_gate_a_call_profile(
     calibration_claims: int = 32,
     dev_claims: int = 80,
@@ -516,7 +520,7 @@ class CampaignRunner:
                 return self._stop_with_artifact(
                     state, index, artifact, CampaignStopReason.BILLING_UNCERTAIN
                 )
-            except (KeyboardInterrupt, RuntimeError):
+            except (KeyboardInterrupt, CampaignProcessInterruption):
                 item.status = WorkStatus.INTERRUPTED
                 item.stop_reason = CampaignStopReason.PROCESS_INTERRUPTION
                 item.interrupted_at = _now()
@@ -577,6 +581,7 @@ class CampaignRunner:
 
 __all__ = [
     "CampaignRunner",
+    "CampaignProcessInterruption",
     "build_campaign_schedule",
     "build_dev_schedule",
     "compute_gate_a_call_profile",

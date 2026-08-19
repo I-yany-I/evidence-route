@@ -8,6 +8,7 @@ from evidence_route.config import GenerationSettings
 from evidence_route.contracts import Strategy
 from evidence_route.evaluation.activity import CampaignState, CampaignStatus, WorkStatus
 from evidence_route.evaluation.runner import (
+    CampaignProcessInterruption,
     CampaignRunner,
     build_dev_schedule,
     compute_gate_a_call_profile,
@@ -126,3 +127,35 @@ async def test_only_linked_dev_artifacts_become_stability_baselines(
         link.claim_id for link in campaign_factory.plan().stability_repeat_zero_links
     }
     assert set(state.stability_repeat_zero_artifact_sha256s) == linked
+
+
+@pytest.mark.asyncio
+async def test_untyped_runtime_error_is_persisted_as_internal_failure(
+    tmp_path: Path, campaign_factory
+) -> None:
+    async def executor(_item):
+        raise RuntimeError("bug in graph adapter")
+
+    with pytest.raises(RuntimeError, match="bug in graph adapter"):
+        await CampaignRunner(tmp_path, executor).run(campaign_factory.plan())
+    state = CampaignState.model_validate_json(
+        (tmp_path / "campaign.json").read_text(encoding="utf-8")
+    )
+    assert state.status is CampaignStatus.FAILED
+    assert state.stop_reason is not None
+    assert state.stop_reason.value == "internal_error"
+
+
+@pytest.mark.asyncio
+async def test_typed_process_interruption_remains_resumable(
+    tmp_path: Path, campaign_factory
+) -> None:
+    async def executor(_item):
+        raise CampaignProcessInterruption("worker stopped")
+
+    with pytest.raises(CampaignProcessInterruption, match="worker stopped"):
+        await CampaignRunner(tmp_path, executor).run(campaign_factory.plan())
+    state = CampaignState.model_validate_json(
+        (tmp_path / "campaign.json").read_text(encoding="utf-8")
+    )
+    assert state.status is CampaignStatus.INTERRUPTED

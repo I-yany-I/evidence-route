@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import secrets
@@ -9,15 +10,29 @@ from typing import Annotated, Protocol
 
 import typer
 import yaml
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from evidence_route.artifacts import atomic_write_json
+from evidence_route.artifacts import SQLiteRunStore, TraceWriter, atomic_write_json
 from evidence_route.budget import PriceConfig
-from evidence_route.config import BudgetSettings, GenerationSettings
+from evidence_route.config import BudgetSettings, GenerationSettings, load_app_config
 from evidence_route.contracts import Strategy, StrictModel
 from evidence_route.evaluation.reporting import ReportInput, build_report_bundle
 from evidence_route.evaluation.runner import (
     compute_gate_a_call_profile,
     estimate_call_bounds,
+)
+from evidence_route.execution import load_price_config
+from evidence_route.graph import GraphComponents, build_graph, initial_state
+from evidence_route.llm import OpenAITransport, StructuredLLM
+from evidence_route.providers.averitec import AveritecFrozenProvider
+from evidence_route.routing import HybridRouter
+from evidence_route.validation import ResultValidator
+from evidence_route.verification import (
+    ClaimDecomposer,
+    EvidenceWorker,
+    SingleVerifier,
+    VerdictJudge,
 )
 
 
@@ -59,7 +74,102 @@ class CapabilityPayload(StrictModel):
 
 class ProductionServices:
     def verify(self, **kwargs: object) -> dict[str, object]:
-        raise RuntimeError("production verify wiring is provided by the evaluation runner")
+        return asyncio.run(self._verify_async(**kwargs))
+
+    async def _verify_async(self, **kwargs: object) -> dict[str, object]:
+        run_id = str(kwargs["run_id"])
+        claim_id = str(kwargs["claim_id"])
+        claim = str(kwargs["claim"])
+        strategy = Strategy(str(kwargs["strategy"]))
+        resume = bool(kwargs["resume"])
+        artifact_dir = Path(kwargs["artifact_dir"])
+        config_path = Path(kwargs["config_path"])
+        corpus_dir = Path(kwargs["corpus_dir"])
+        checkpoint_db = Path(kwargs["checkpoint_db"])
+        pricing_value = kwargs.get("pricing_path")
+        if pricing_value is None:
+            pricing_value = os.environ.get("EVIDENCE_ROUTE_PRICE_FILE")
+        if pricing_value is None:
+            raise ValueError("pricing_path or EVIDENCE_ROUTE_PRICE_FILE is required")
+        pricing = load_price_config(Path(pricing_value))
+        app_config = load_app_config(config_path)
+
+        run_dir = artifact_dir / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        run_store = SQLiteRunStore(
+            run_dir / "run-store.sqlite3",
+            activity_id=run_id,
+            cap_cny=app_config.budget.estimated_cost_cap_cny,
+            pricing=pricing,
+        )
+        provider = AveritecFrozenProvider(corpus_dir)
+        transport = OpenAITransport(app_config.llm)
+        llm = StructuredLLM(settings=app_config.llm, transport=transport, run_store=run_store)
+        components = GraphComponents(
+            provider=provider,
+            router=HybridRouter(app_config.routing, app_config.generation, llm=llm),
+            single=SingleVerifier(
+                provider, llm, app_config.evidence, app_config.generation
+            ),
+            decomposer=ClaimDecomposer(llm, app_config.generation),
+            worker=EvidenceWorker(
+                provider, llm, app_config.evidence, app_config.generation
+            ),
+            judge=VerdictJudge(llm, app_config.evidence, app_config.generation),
+            validator=ResultValidator(
+                low_confidence=app_config.routing.low_confidence,
+                minimum_coverage=app_config.routing.minimum_coverage,
+            ),
+            evidence_settings=app_config.evidence,
+            run_store=run_store,
+            trace=TraceWriter(run_dir / "trace.jsonl"),
+        )
+        graph_config = {"configurable": {"thread_id": run_id}}
+        async with AsyncSqliteSaver.from_conn_string(str(checkpoint_db)) as saver:
+            # Pydantic evidence objects are part of graph state; pickle fallback keeps
+            # the async SQLite checkpoint faithful across process restarts.
+            saver.serde = JsonPlusSerializer(pickle_fallback=True)
+            graph = build_graph(components, checkpointer=saver)
+            snapshot = await graph.aget_state(graph_config)
+            values = getattr(snapshot, "values", None) or {}
+            next_nodes = getattr(snapshot, "next", ())
+            if resume:
+                if values:
+                    checkpoint_claim = values.get("claim_id")
+                    if checkpoint_claim != claim_id:
+                        raise ValueError("resume claim_id does not match checkpoint claim")
+                    checkpoint_text = values.get("claim_text")
+                    if checkpoint_text != claim:
+                        raise ValueError("resume claim does not match checkpoint claim")
+                    checkpoint_strategy = values.get("strategy")
+                    try:
+                        checkpoint_strategy = Strategy(str(checkpoint_strategy))
+                    except ValueError as exc:
+                        raise ValueError("checkpoint strategy is invalid") from exc
+                    if checkpoint_strategy is not strategy:
+                        raise ValueError("resume strategy does not match checkpoint strategy")
+                    input_state = None
+                else:
+                    input_state = initial_state(run_id, claim_id, claim, strategy)
+            else:
+                if values or getattr(snapshot, "next", ()):
+                    raise ValueError("run_id already has a checkpoint; use --resume")
+                input_state = initial_state(run_id, claim_id, claim, strategy)
+            if resume and values and not next_nodes:
+                state = values
+            else:
+                state = await graph.ainvoke(input_state, config=graph_config)
+
+        result = state.get("final_result")
+        if result is None:
+            raise ValueError("graph completed without final_result")
+        summary = run_store.summarize_run(run_id)
+        return {
+            **result.model_dump(mode="json"),
+            "run_id": run_id,
+            "strategy": strategy.value,
+            "summary": summary.model_dump(mode="json"),
+        }
 
     def provider_smoke(self, **kwargs: object) -> dict[str, object]:
         raise RuntimeError("production provider wiring is not configured")

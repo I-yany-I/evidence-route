@@ -22,7 +22,7 @@ from evidence_route.evaluation.activity import (
     artifact_fingerprint,
     campaign_fingerprint,
 )
-from evidence_route.evaluation.runner import build_campaign_schedule
+from evidence_route.evaluation.runner import CampaignProcessInterruption, build_campaign_schedule
 
 SHA = "a" * 64
 GIT = "b" * 40
@@ -132,7 +132,7 @@ class FixtureExecutor:
     async def __call__(self, item: CampaignWorkItem) -> RunArtifact:
         self.calls += 1
         if self.fail_after is not None and self.calls > self.fail_after:
-            raise RuntimeError("injected interruption")
+            raise CampaignProcessInterruption("injected interruption")
         if self.exceed_budget_after is not None and self.calls > self.exceed_budget_after:
             raise BudgetExceeded("fixture budget")
         model_id = self.model_ids[min(self.calls - 1, len(self.model_ids) - 1)]

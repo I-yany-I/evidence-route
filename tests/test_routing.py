@@ -1,5 +1,6 @@
 import pytest
 
+from evidence_route.budget import BudgetExceeded, UsageUnavailable
 from evidence_route.config import GenerationSettings, RoutingSettings, stable_hash
 from evidence_route.contracts import ClaimFeatures, ClaimUnit, Strategy
 from evidence_route.routing import HybridRouter, RouterPayload, StructuredCallError
@@ -75,6 +76,14 @@ class FailingLLM:
         raise StructuredCallError("router unavailable")
 
 
+class SafetyStopLLM:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def invoke(self, **kwargs: object):
+        raise self.error
+
+
 @pytest.mark.asyncio
 async def test_uncertain_route_uses_structured_llm() -> None:
     claim_features = features(
@@ -102,3 +111,18 @@ async def test_router_failure_falls_back_to_multi() -> None:
     assert decision.source == "fallback"
     assert decision.route == "multi"
     assert decision.config_hash == stable_hash(RoutingSettings().model_dump(mode="json"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [BudgetExceeded("cap"), UsageUnavailable("usage")])
+async def test_router_propagates_safety_stops(error: Exception) -> None:
+    claim_features = features(
+        atomic_clause_count=2,
+        claim_units=[ClaimUnit(unit_id="u0", text="one"), ClaimUnit(unit_id="u1", text="two")],
+        probe_source_count=1,
+    )
+    router = HybridRouter(
+        RoutingSettings(), GenerationSettings(), llm=SafetyStopLLM(error)
+    )
+    with pytest.raises(type(error), match=str(error)):
+        await router.route("run", Strategy.ADAPTIVE, claim_features)
