@@ -6,16 +6,22 @@ import os
 import secrets
 import uuid
 from pathlib import Path
-from typing import Annotated, Protocol
+from typing import Annotated, Literal, Protocol
 
 import typer
 import yaml
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from pydantic import Field
 
 from evidence_route.artifacts import SQLiteRunStore, TraceWriter, atomic_write_json
 from evidence_route.budget import PriceConfig
-from evidence_route.config import BudgetSettings, GenerationSettings, load_app_config
+from evidence_route.config import (
+    BudgetSettings,
+    GenerationSettings,
+    load_app_config,
+    stable_hash,
+)
 from evidence_route.contracts import Strategy, StrictModel
 from evidence_route.evaluation.reporting import ReportInput, build_report_bundle
 from evidence_route.evaluation.runner import (
@@ -24,7 +30,7 @@ from evidence_route.evaluation.runner import (
 )
 from evidence_route.execution import load_price_config
 from evidence_route.graph import GraphComponents, build_graph, initial_state
-from evidence_route.llm import OpenAITransport, StructuredLLM
+from evidence_route.llm import OpenAITransport, StructuredLLM, ensure_v1
 from evidence_route.providers.averitec import AveritecFrozenProvider
 from evidence_route.routing import HybridRouter
 from evidence_route.validation import ResultValidator
@@ -68,8 +74,24 @@ class CliServices(Protocol):
 
 
 class CapabilityPayload(StrictModel):
-    ok: bool
-    nonce: str
+    ok: Literal[True]
+    nonce: str = Field(min_length=8, max_length=64)
+
+
+class ProviderSmokeResult(StrictModel):
+    structured_output: Literal[True]
+    usage_complete: Literal[True]
+    requested_alias: str = Field(min_length=1)
+    response_model_id_raw: str = Field(min_length=1)
+    identity_verified: Literal[False]
+    nonce: str = Field(min_length=8, max_length=64)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    estimated_cost_micro_cny: int = Field(ge=0)
+    call_ids: list[
+        Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    ] = Field(min_length=1, max_length=1)
+    endpoint_config_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class ProductionServices:
@@ -172,7 +194,84 @@ class ProductionServices:
         }
 
     def provider_smoke(self, **kwargs: object) -> dict[str, object]:
-        raise RuntimeError("production provider wiring is not configured")
+        return asyncio.run(self._provider_smoke_async(**kwargs))
+
+    async def _provider_smoke_async(self, **kwargs: object) -> dict[str, object]:
+        nonce = str(kwargs["nonce"])
+        config_path = Path(kwargs["config_path"])
+        pricing_path = Path(kwargs["pricing_path"])
+        artifact_dir = Path(kwargs["artifact_dir"])
+        expected = CapabilityPayload(ok=True, nonce=nonce)
+        app_config = load_app_config(config_path)
+        pricing = load_price_config(pricing_path)
+        endpoint_config_hash = stable_hash(
+            {"base_url": ensure_v1(app_config.llm.base_url)}
+        )
+        run_id = stable_hash({"kind": "provider-smoke", "nonce": nonce})
+        run_store = SQLiteRunStore(
+            artifact_dir / "run-store.sqlite3",
+            activity_id="provider-smoke",
+            cap_cny=app_config.budget.estimated_cost_cap_cny,
+            pricing=pricing,
+        )
+        llm = StructuredLLM(
+            settings=app_config.llm,
+            transport=OpenAITransport(app_config.llm),
+            run_store=run_store,
+        )
+        response = await llm.invoke(
+            run_id=run_id,
+            node="provider_smoke",
+            task_id="capability",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Return only JSON that exactly matches the supplied schema.",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Echo this capability payload exactly: "
+                        f"{expected.model_dump_json()}"
+                    ),
+                },
+            ],
+            schema=CapabilityPayload,
+            max_input_tokens=app_config.generation.router.max_input_tokens,
+            max_output_tokens=app_config.generation.router.max_output_tokens,
+            allow_repair=False,
+        )
+        if response.value.nonce != nonce:
+            raise ValueError("provider capability nonce mismatch")
+
+        summary = run_store.summarize_run(run_id)
+        if summary.call_ids != list(response.call_ids) or len(summary.call_ids) != 1:
+            raise ValueError("provider capability must contain exactly one logical call")
+        if summary.usage != response.usage or not summary.usage.complete:
+            raise ValueError("provider capability usage is incomplete or inconsistent")
+        if summary.requested_aliases != [app_config.llm.requested_alias]:
+            raise ValueError("provider capability requested alias is inconsistent")
+        if len(summary.response_model_ids_raw) != 1:
+            raise ValueError("provider did not report a model id")
+        if summary.actual_cost_micro_cny is None or summary.cost_is_lower_bound:
+            raise ValueError("provider capability cost is not exact")
+        if summary.billing_uncertain:
+            raise ValueError("provider capability billing is uncertain")
+
+        result = ProviderSmokeResult(
+            structured_output=True,
+            usage_complete=True,
+            requested_alias=summary.requested_aliases[0],
+            response_model_id_raw=summary.response_model_ids_raw[0],
+            identity_verified=False,
+            nonce=response.value.nonce,
+            input_tokens=summary.usage.input_tokens,
+            output_tokens=summary.usage.output_tokens,
+            estimated_cost_micro_cny=summary.actual_cost_micro_cny,
+            call_ids=summary.call_ids,
+            endpoint_config_hash=endpoint_config_hash,
+        )
+        return result.model_dump(mode="json")
 
     def preview_campaign(self, **kwargs: object) -> dict[str, object]:
         config_path = Path(kwargs["config_path"])

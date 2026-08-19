@@ -82,6 +82,7 @@ class StructuredLLM:
         schema: type[T],
         max_input_tokens: int,
         max_output_tokens: int,
+        allow_repair: bool = True,
     ) -> StructuredResult[T]:
         return await self._invoke_attempt(
             run_id=run_id,
@@ -92,6 +93,7 @@ class StructuredLLM:
             max_input_tokens=max_input_tokens,
             max_output_tokens=max_output_tokens,
             logical_attempt=0,
+            allow_repair=allow_repair,
         )
 
     async def _invoke_attempt(
@@ -105,6 +107,7 @@ class StructuredLLM:
         max_input_tokens: int,
         max_output_tokens: int,
         logical_attempt: int,
+        allow_repair: bool,
     ) -> StructuredResult[T]:
         call_id = make_call_id(run_id, node, task_id, logical_attempt)
         request_sha256 = self._request_hash(
@@ -120,7 +123,7 @@ class StructuredLLM:
             try:
                 value = schema.model_validate_json(metadata["payload"]["content"])
             except (ValidationError, KeyError, TypeError) as exc:
-                if logical_attempt >= 1:
+                if not allow_repair or logical_attempt >= 1:
                     raise
                 repair_messages = self._repair_messages(messages, str(exc))
                 repaired = await self._invoke_attempt(
@@ -132,6 +135,7 @@ class StructuredLLM:
                     max_input_tokens=max_input_tokens,
                     max_output_tokens=max_output_tokens,
                     logical_attempt=1,
+                    allow_repair=allow_repair,
                 )
                 return StructuredResult(
                     value=repaired.value,
@@ -213,7 +217,7 @@ class StructuredLLM:
         try:
             value = schema.model_validate_json(raw.content)
         except (ValidationError, ValueError) as exc:
-            if logical_attempt >= 1:
+            if not allow_repair or logical_attempt >= 1:
                 raise
             repaired = await self._invoke_attempt(
                 run_id=run_id,
@@ -224,6 +228,7 @@ class StructuredLLM:
                 max_input_tokens=max_input_tokens,
                 max_output_tokens=max_output_tokens,
                 logical_attempt=1,
+                allow_repair=allow_repair,
             )
             return StructuredResult(
                 value=repaired.value,
