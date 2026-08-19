@@ -179,6 +179,49 @@ def test_missing_usage_response_is_terminal_and_never_reissued(tmp_path: Path) -
     assert summary.cost_is_lower_bound is True
 
 
+@pytest.mark.parametrize(
+    ("unresolved_state", "billing_uncertain"),
+    [
+        ("reserved", False),
+        ("sent", True),
+        ("billing_uncertain", True),
+    ],
+)
+def test_mixed_completed_and_unresolved_calls_are_not_complete(
+    tmp_path: Path,
+    unresolved_state: str,
+    billing_uncertain: bool,
+) -> None:
+    store = make_store(tmp_path)
+    reserve(store)
+    complete(store)
+    store.reserve_call(
+        "call-2",
+        request_sha256="b" * 64,
+        run_id="run-1",
+        node="worker",
+        task_id="t0",
+        logical_attempt=0,
+        max_input_tokens=100,
+        max_output_tokens=20,
+    )
+    if unresolved_state in {"sent", "billing_uncertain"}:
+        store.mark_sent("call-2")
+    if unresolved_state == "billing_uncertain":
+        store.mark_billing_uncertain("call-2")
+
+    metadata = store.get_call_metadata("call-2")
+    assert metadata is not None
+    assert metadata["state"] == unresolved_state
+    summary = store.summarize_run("run-1")
+
+    assert summary.usage.complete is False
+    assert summary.actual_cost_micro_cny is None
+    assert summary.cost_is_lower_bound is True
+    assert "missing" in summary.usage_sources
+    assert summary.billing_uncertain is billing_uncertain
+
+
 def test_usage_missing_reservation_stays_committed_during_parallel_reserve(
     tmp_path: Path,
 ) -> None:

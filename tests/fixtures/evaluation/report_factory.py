@@ -133,9 +133,9 @@ class ReportInputFactory:
         claims = [{"claim_id": f"dev-{index}"} for index in range(80)]
         schedule, links = build_campaign_schedule(
             claims,
+            stability_runtime_claims=claims[:20],
             seed=20260817,
             campaign_id="dev-campaign",
-            stability_claims=20,
         )
         plan_payload: dict[str, object] = {
             "schema_version": "1",

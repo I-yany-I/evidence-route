@@ -148,7 +148,10 @@ class CampaignFactory:
         self.campaign_id = "campaign"
         claims = [{"claim_id": f"dev-{index}"} for index in range(21)]
         schedule, links = build_campaign_schedule(
-            claims, seed=20260817, campaign_id=self.campaign_id, stability_claims=20
+            claims,
+            stability_runtime_claims=claims[:20],
+            seed=20260817,
+            campaign_id=self.campaign_id,
         )
         payload = {
             "schema_version": "1",

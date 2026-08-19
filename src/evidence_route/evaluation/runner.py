@@ -173,18 +173,27 @@ def build_dev_schedule(
 def build_campaign_schedule(
     runtime_claims: Iterable[object],
     *,
+    stability_runtime_claims: Iterable[object],
     seed: int,
     campaign_id: str = "campaign",
-    stability_claims: int = 20,
 ) -> tuple[list[CampaignWorkItem], list[dict[str, str]]]:
     """Build dev items plus adaptive stability repeats and their immutable links."""
 
     claims = list(runtime_claims)
+    stability_claims = list(stability_runtime_claims)
+    if len(stability_claims) != 20:
+        raise ValueError("stability runtime manifest must contain exactly 20 claims")
+    dev_claim_ids = {_claim_id(claim) for claim in claims}
+    stability_claim_ids = [_claim_id(claim) for claim in stability_claims]
+    if len(stability_claim_ids) != len(set(stability_claim_ids)):
+        raise ValueError("stability runtime manifest claim IDs must be unique")
+    if not set(stability_claim_ids).issubset(dev_claim_ids):
+        raise ValueError("stability runtime manifest must be a subset of the dev manifest")
+
     dev = build_dev_schedule(claims, seed=seed, campaign_id=campaign_id)
-    selected_claims = [_claim_id(item) for item in claims[:stability_claims]]
     links: list[dict[str, str]] = []
     schedule = list(dev)
-    for claim_id in selected_claims:
+    for claim_id in stability_claim_ids:
         adaptive = next(
             item for item in dev if item.claim_id == claim_id and item.strategy is Strategy.ADAPTIVE
         )
@@ -257,6 +266,164 @@ class CampaignRunner:
     def _write_state(self, state: CampaignState) -> None:
         atomic_write_json(self.state_path, state.model_dump(mode="json"))
 
+    def _verify_state_items(self, plan: CampaignPlan, state: CampaignState) -> None:
+        if len(state.items) != len(plan.schedule):
+            raise ValueError("campaign state items do not match persisted plan length")
+        for index, (work, item) in enumerate(zip(plan.schedule, state.items, strict=True)):
+            expected_relpath = f"artifacts/{work.run_id}.json"
+            if item.run_id != work.run_id or item.artifact_relpath != expected_relpath:
+                raise ValueError(
+                    f"campaign state items do not match persisted plan at index {index}"
+                )
+
+    def _verify_run_store_identity(self, plan: CampaignPlan) -> None:
+        if self.run_store is None:
+            return
+        if self.run_store.activity_id != plan.activity_id:
+            raise FreezeMismatch(
+                "run_store.activity_id",
+                expected=plan.activity_id,
+                actual=self.run_store.activity_id,
+            )
+        if self.run_store.cap_micro_cny != plan.cap_micro_cny:
+            raise FreezeMismatch(
+                "run_store.cap_micro_cny",
+                expected=plan.cap_micro_cny,
+                actual=self.run_store.cap_micro_cny,
+            )
+
+    @staticmethod
+    def _verify_artifact_identity(
+        plan: CampaignPlan,
+        work: CampaignWorkItem,
+        artifact: RunArtifact,
+    ) -> None:
+        expected = (
+            plan.activity_id,
+            plan.campaign_id,
+            work.phase,
+            work.run_id,
+            work.claim_id,
+            work.strategy,
+            work.repeat,
+            plan.freeze.requested_alias,
+        )
+        actual = (
+            artifact.activity_id,
+            artifact.campaign_id,
+            artifact.phase,
+            artifact.run_id,
+            artifact.claim_id,
+            artifact.strategy,
+            artifact.repeat,
+            artifact.requested_alias,
+        )
+        if actual != expected:
+            raise ValueError(f"artifact identity does not match campaign plan for {work.run_id}")
+
+    @staticmethod
+    def _require_accounting_match(field: str, expected: object, actual: object) -> None:
+        if actual != expected:
+            raise FreezeMismatch(
+                f"run_store.{field}",
+                expected=expected,
+                actual=actual,
+            )
+
+    def _verify_run_store_accounting(self, artifact: RunArtifact) -> None:
+        if self.run_store is None:
+            return
+        summary = self.run_store.summarize_run(artifact.run_id)
+        if not summary.call_ids:
+            if artifact.call_ids:
+                self._require_accounting_match("call_ids", [], artifact.call_ids)
+            zero_accounting = (
+                artifact.usage.input_tokens == 0
+                and artifact.usage.output_tokens == 0
+                and artifact.usage.total_tokens == 0
+                and artifact.actual_cost_micro_cny in {None, 0}
+                and artifact.known_actual_cost_micro_cny == 0
+                and artifact.committed_cost_micro_cny == 0
+                and artifact.fresh_call_count == 0
+            )
+            if not zero_accounting:
+                raise FreezeMismatch(
+                    "run_store.zero_call_accounting",
+                    expected="zero accounting",
+                    actual=artifact.model_dump(mode="json"),
+                )
+            return
+        expected_usage = summary.usage
+        if "missing" in summary.usage_sources or not summary.usage.complete:
+            expected_usage_source = "missing"
+        else:
+            expected_usage_source = "provider"
+
+        comparisons = {
+            "call_ids": (summary.call_ids, artifact.call_ids),
+            "usage": (
+                expected_usage.model_dump(mode="json"),
+                artifact.usage.model_dump(mode="json"),
+            ),
+            "usage_source": (expected_usage_source, artifact.usage_source),
+            "actual_cost_micro_cny": (
+                summary.actual_cost_micro_cny,
+                artifact.actual_cost_micro_cny,
+            ),
+            "known_actual_cost_micro_cny": (
+                summary.known_actual_cost_micro_cny,
+                artifact.known_actual_cost_micro_cny,
+            ),
+            "committed_cost_micro_cny": (
+                summary.committed_cost_micro_cny,
+                artifact.committed_cost_micro_cny,
+            ),
+            "cost_is_lower_bound": (
+                summary.cost_is_lower_bound,
+                artifact.cost_is_lower_bound,
+            ),
+            "fresh_call_count": (summary.fresh_call_count, artifact.fresh_call_count),
+            "cache_hit_count": (summary.cache_hit_count, artifact.cache_hit_count),
+            "response_model_ids_raw": (
+                summary.response_model_ids_raw,
+                artifact.response_model_ids_raw,
+            ),
+            "billing_uncertain": (
+                summary.billing_uncertain,
+                artifact.billing_uncertain,
+            ),
+        }
+        for field, (expected, actual) in comparisons.items():
+            self._require_accounting_match(field, expected, actual)
+        if summary.requested_aliases:
+            self._require_accounting_match(
+                "requested_aliases", [artifact.requested_alias], summary.requested_aliases
+            )
+
+    def _verify_persisted_artifacts(self, plan: CampaignPlan, state: CampaignState) -> None:
+        for work, item in zip(plan.schedule, state.items, strict=True):
+            path = self.root / item.artifact_relpath
+            if item.artifact_sha256 is None:
+                if path.is_file():
+                    raise FreezeMismatch(
+                        "unlinked_artifact",
+                        expected=None,
+                        actual=str(path),
+                    )
+                continue
+            if not path.is_file():
+                raise FileNotFoundError(f"missing artifact for run {work.run_id}: {path}")
+            artifact = RunArtifact.model_validate_json(path.read_text(encoding="utf-8"))
+            verify_artifact_fingerprint(artifact)
+            if artifact.artifact_sha256 != item.artifact_sha256:
+                raise FreezeMismatch(
+                    "artifact_sha256",
+                    expected=artifact.artifact_sha256,
+                    actual=item.artifact_sha256,
+                )
+            self._verify_artifact_identity(plan, work, artifact)
+            self._verify_run_store_accounting(artifact)
+
     def _refresh_summary(self, state: CampaignState) -> None:
         """Recompute accounting from immutable artifact files, never from counters."""
 
@@ -291,6 +458,7 @@ class CampaignRunner:
             raise FileExistsError("campaign directory already contains a persisted plan")
         if plan.call_bounds.startup_required_micro_cny > plan.cap_micro_cny:
             raise BudgetExceeded("startup worst-case reservation exceeds campaign cap")
+        self._verify_run_store_identity(plan)
         self.root.mkdir(parents=True, exist_ok=True)
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         self._write_plan(plan)
@@ -302,29 +470,36 @@ class CampaignRunner:
         plan = self._load_plan()
         if plan.call_bounds.startup_required_micro_cny > plan.cap_micro_cny:
             raise BudgetExceeded("startup worst-case reservation exceeds campaign cap")
+        self._verify_run_store_identity(plan)
         if expected_identity is not None:
             compare_freeze_identity(plan.freeze, expected_identity)
         state = self._load_state()
         if state.activity_id != plan.activity_id or state.campaign_id != plan.campaign_id:
             raise ValueError("campaign state does not match persisted plan")
+        self._verify_state_items(plan, state)
+        self._verify_persisted_artifacts(plan, state)
+        running_items = [item for item in state.items if item.status is WorkStatus.RUNNING]
+        if len(running_items) > 1:
+            raise ValueError("campaign state is corrupt: multiple running items")
         # A process can die after marking RUNNING.  Normalize exactly one such item and retain
         # interruption timestamps as audit history before allowing another transport call.
         changed = False
-        for item in state.items:
-            if item.status is WorkStatus.RUNNING:
-                item.status = WorkStatus.INTERRUPTED
-                item.stop_reason = CampaignStopReason.PROCESS_INTERRUPTION
-                item.interrupted_at = item.interrupted_at or _now()
-                changed = True
+        running_item = next(
+            (item for item in state.items if item.status is WorkStatus.RUNNING),
+            None,
+        )
+        if running_item is not None:
+            running_item.status = WorkStatus.INTERRUPTED
+            running_item.stop_reason = CampaignStopReason.PROCESS_INTERRUPTION
+            running_item.interrupted_at = running_item.interrupted_at or _now()
+            changed = True
         if changed:
             state.stop_reason = CampaignStopReason.PROCESS_INTERRUPTION
             state.status = CampaignStatus.INTERRUPTED
             self._write_state(state)
-            for item in state.items:
-                if item.status is WorkStatus.INTERRUPTED:
-                    item.status = WorkStatus.PENDING
-                    item.stop_reason = None
-                    item.resumed_at = _now()
+            running_item.status = WorkStatus.PENDING
+            running_item.stop_reason = None
+            running_item.resumed_at = _now()
             state.stop_reason = None
             state.status = CampaignStatus.RUNNING
             self._write_state(state)
@@ -336,7 +511,12 @@ class CampaignRunner:
             result = await result
         return result if isinstance(result, RunArtifact) else RunArtifact.model_validate(result)
 
-    def _persist_artifact(self, artifact: RunArtifact, work: CampaignWorkItem) -> str:
+    def _persist_artifact(
+        self,
+        plan: CampaignPlan,
+        artifact: RunArtifact,
+        work: CampaignWorkItem,
+    ) -> str:
         if (
             artifact.run_id != work.run_id
             or artifact.claim_id != work.claim_id
@@ -345,7 +525,9 @@ class CampaignRunner:
             or artifact.phase != work.phase
         ):
             raise ValueError("executor artifact does not match scheduled work item")
+        self._verify_artifact_identity(plan, work, artifact)
         verify_artifact_fingerprint(artifact)
+        self._verify_run_store_accounting(artifact)
         path = self.root / f"artifacts/{artifact.run_id}.json"
         atomic_write_json(path, artifact.model_dump(mode="json"))
         return artifact.artifact_sha256
@@ -361,15 +543,25 @@ class CampaignRunner:
         known_cost = committed_cost = cache_hits = 0
         requested_alias = plan.freeze.requested_alias
         response_ids: list[str] = []
+        usage_source = "missing"
+        actual_cost: int | None = None
+        cost_is_lower_bound = True
+        billing_uncertain = reason is CampaignStopReason.BILLING_UNCERTAIN
         if self.run_store is not None:
             summary = self.run_store.summarize_run(work.run_id)
-            call_ids = summary.call_ids
-            known_cost = summary.known_actual_cost_micro_cny
-            committed_cost = summary.committed_cost_micro_cny
-            cache_hits = summary.cache_hit_count
-            requested_alias = next(iter(summary.requested_aliases), requested_alias)
-            response_ids = summary.response_model_ids_raw
-            usage = summary.usage.model_copy(update={"complete": False})
+            if summary.call_ids:
+                call_ids = summary.call_ids
+                known_cost = summary.known_actual_cost_micro_cny
+                committed_cost = summary.committed_cost_micro_cny
+                cache_hits = summary.cache_hit_count
+                response_ids = summary.response_model_ids_raw
+                usage = summary.usage
+                usage_source = "provider" if summary.usage.complete else "missing"
+                actual_cost = summary.actual_cost_micro_cny
+                cost_is_lower_bound = summary.cost_is_lower_bound
+                billing_uncertain = billing_uncertain or summary.billing_uncertain
+            else:
+                usage = Usage(input_tokens=0, output_tokens=0, total_tokens=0, complete=False)
         else:
             usage = Usage(input_tokens=0, output_tokens=0, total_tokens=0, complete=False)
         result = VerificationResult(
@@ -397,17 +589,17 @@ class CampaignRunner:
             "result": result.model_dump(mode="json"),
             "call_ids": call_ids,
             "usage": usage.model_dump(mode="json"),
-            "usage_source": "missing",
-            "actual_cost_micro_cny": None,
+            "usage_source": usage_source,
+            "actual_cost_micro_cny": actual_cost,
             "known_actual_cost_micro_cny": known_cost,
             "committed_cost_micro_cny": committed_cost,
-            "cost_is_lower_bound": True,
+            "cost_is_lower_bound": cost_is_lower_bound,
             "fresh_call_count": len(call_ids),
             "cache_hit_count": cache_hits,
             "requested_alias": requested_alias,
             "response_model_ids_raw": response_ids,
             "identity_verified": False,
-            "billing_uncertain": reason is CampaignStopReason.BILLING_UNCERTAIN,
+            "billing_uncertain": billing_uncertain,
             "diagnostic_only": True,
             "latency": {
                 "fresh_end_to_end_ms": 0,
@@ -461,19 +653,13 @@ class CampaignRunner:
 
     def _stop_with_artifact(
         self,
+        plan: CampaignPlan,
         state: CampaignState,
         index: int,
         artifact: RunArtifact,
         reason: CampaignStopReason,
     ) -> CampaignState:
-        digest = self._persist_artifact(artifact, CampaignWorkItem.model_validate({
-            "order": index,
-            "phase": artifact.phase,
-            "claim_id": artifact.claim_id,
-            "strategy": artifact.strategy,
-            "repeat": artifact.repeat,
-            "run_id": artifact.run_id,
-        }))
+        digest = self._persist_artifact(plan, artifact, plan.schedule[index])
         item = state.items[index]
         item.status = WorkStatus.STOPPED
         item.stop_reason = reason
@@ -518,7 +704,7 @@ class CampaignRunner:
                     plan, work, CampaignStopReason.BILLING_UNCERTAIN, str(exc)
                 )
                 return self._stop_with_artifact(
-                    state, index, artifact, CampaignStopReason.BILLING_UNCERTAIN
+                    plan, state, index, artifact, CampaignStopReason.BILLING_UNCERTAIN
                 )
             except (KeyboardInterrupt, CampaignProcessInterruption):
                 item.status = WorkStatus.INTERRUPTED
@@ -533,35 +719,34 @@ class CampaignRunner:
                     plan, work, CampaignStopReason.INTERNAL_ERROR, str(exc)
                 )
                 self._stop_with_artifact(
-                    state, index, artifact, CampaignStopReason.INTERNAL_ERROR
+                    plan, state, index, artifact, CampaignStopReason.INTERNAL_ERROR
                 )
                 raise
 
-            if artifact.activity_id != plan.activity_id or artifact.campaign_id != plan.campaign_id:
-                item.status = WorkStatus.STOPPED
-                item.stop_reason = CampaignStopReason.INTERNAL_ERROR
-                item.errors.append("executor artifact identity does not match campaign plan")
-                state.stop_reason = CampaignStopReason.INTERNAL_ERROR
-                state.status = CampaignStatus.FAILED
-                self._write_state(state)
-                raise ValueError("executor artifact identity does not match campaign plan")
-
+            # Identity is part of the frozen protocol, not an executor error that can be
+            # converted into a diagnostic result.  A mismatch leaves the journal RUNNING so a
+            # subsequent resume performs the same immutable audit before any retry.
+            self._verify_artifact_identity(plan, work, artifact)
             ids = _model_ids(artifact)
             if not baseline and ids:
                 baseline = set(ids)
                 state.observed_response_model_ids_raw = sorted(ids)
             elif len(ids) > 1 or (ids and ids != baseline):
-                self._stop_with_artifact(state, index, artifact, CampaignStopReason.MODEL_DRIFT)
+                self._stop_with_artifact(
+                    plan, state, index, artifact, CampaignStopReason.MODEL_DRIFT
+                )
                 return state
             if artifact.billing_uncertain:
                 self._stop_with_artifact(
-                    state, index, artifact, CampaignStopReason.BILLING_UNCERTAIN
+                    plan, state, index, artifact, CampaignStopReason.BILLING_UNCERTAIN
                 )
                 return state
             if artifact.usage_source == "missing" or not artifact.usage.complete:
-                self._stop_with_artifact(state, index, artifact, CampaignStopReason.USAGE_MISSING)
+                self._stop_with_artifact(
+                    plan, state, index, artifact, CampaignStopReason.USAGE_MISSING
+                )
                 return state
-            digest = self._persist_artifact(artifact, work)
+            digest = self._persist_artifact(plan, artifact, work)
             item.artifact_sha256 = digest
             item.status = result_status_to_work_status(artifact.result.status)
             if (

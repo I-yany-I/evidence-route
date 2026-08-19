@@ -507,6 +507,7 @@ class SQLiteRunStore:
         identity_values: list[bool] = []
         billing_uncertain = False
         for row in rows:
+            state = CallState(row["state"])
             fresh += 1
             cache_hits += row["cache_hits"]
             transport += row["transport_attempts"]
@@ -516,6 +517,8 @@ class SQLiteRunStore:
                 model_ids.append(row["response_model_id_raw"])
             if row["usage_source"]:
                 usage_sources.append(row["usage_source"])
+            elif state is not CallState.COMPLETED:
+                usage_sources.append("missing")
             if row["identity_verified"] is not None:
                 identity_values.append(bool(row["identity_verified"]))
             if row["actual_micro_cny"] is not None:
@@ -523,9 +526,9 @@ class SQLiteRunStore:
                 committed += row["actual_micro_cny"]
             else:
                 committed += row["reserved_micro_cny"]
-            if row["state"] != CallState.COMPLETED.value:
+            if state is not CallState.COMPLETED:
                 actual_exact = False
-            if row["state"] == CallState.BILLING_UNCERTAIN.value:
+            if state in {CallState.SENT, CallState.BILLING_UNCERTAIN}:
                 billing_uncertain = True
             if row["usage_json"]:
                 usage = Usage.model_validate_json(row["usage_json"])
@@ -533,6 +536,8 @@ class SQLiteRunStore:
                 output_tokens += usage.output_tokens
                 total_tokens += usage.total_tokens
                 all_complete = all_complete and usage.complete
+            else:
+                all_complete = False
         usage = Usage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,

@@ -1,21 +1,103 @@
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
 
-from evidence_route.artifacts import BillingStateError
+from evidence_route.artifacts import BillingStateError, SQLiteRunStore, atomic_write_json
 from evidence_route.budget import PriceConfig
 from evidence_route.config import GenerationSettings
 from evidence_route.contracts import Strategy
-from evidence_route.evaluation.activity import CampaignState, CampaignStatus, WorkStatus
+from evidence_route.evaluation.activity import (
+    CampaignState,
+    CampaignStatus,
+    CampaignStopReason,
+    FreezeMismatch,
+    RunArtifact,
+    WorkStatus,
+    artifact_fingerprint,
+)
 from evidence_route.evaluation.runner import (
     CampaignProcessInterruption,
     CampaignRunner,
+    build_campaign_schedule,
     build_dev_schedule,
     compute_gate_a_call_profile,
     estimate_call_bounds,
 )
+from evidence_route.execution import build_run_artifact
 
 pytest_plugins = ["tests.fixtures.evaluation.campaign_factory"]
+
+
+def _load_state(root: Path) -> CampaignState:
+    return CampaignState.model_validate_json(
+        (root / "campaign.json").read_text(encoding="utf-8")
+    )
+
+
+def _load_state_payload(root: Path) -> dict[str, object]:
+    return json.loads((root / "campaign.json").read_text(encoding="utf-8"))
+
+
+def _write_state_payload(root: Path, payload: dict[str, object]) -> None:
+    atomic_write_json(root / "campaign.json", payload)
+
+
+async def _persist_interrupted_after_one(
+    root: Path,
+    campaign_factory,
+    *,
+    run_store: SQLiteRunStore | None = None,
+    executor=None,
+) -> None:
+    first = executor or campaign_factory.executor(fail_after=1)
+    with pytest.raises(CampaignProcessInterruption, match="injected interruption"):
+        await CampaignRunner(root, first, run_store=run_store).run(campaign_factory.plan())
+
+
+def _run_store(path: Path, activity_id: str) -> SQLiteRunStore:
+    return SQLiteRunStore(
+        path,
+        activity_id=activity_id,
+        cap_cny=1.0,
+        pricing=PriceConfig(
+            provider="fixture",
+            currency="CNY",
+            input_per_million=1,
+            output_per_million=1,
+            price_source="fixture",
+            strict_evaluation=True,
+        ),
+    )
+
+
+def _record_artifact_call(
+    store: SQLiteRunStore, artifact: RunArtifact, *, suffix: str = ""
+) -> None:
+    call_id = artifact.call_ids[0] + suffix
+    request_sha256 = hashlib.sha256(call_id.encode()).hexdigest()
+    store.reserve_call(
+        call_id,
+        request_sha256=request_sha256,
+        run_id=artifact.run_id,
+        node="single",
+        task_id=f"root{suffix}",
+        logical_attempt=0,
+        max_input_tokens=artifact.usage.input_tokens,
+        max_output_tokens=artifact.usage.output_tokens,
+    )
+    store.mark_sent(call_id)
+    store.complete_call(
+        call_id,
+        request_sha256=request_sha256,
+        payload={"content": "fixture"},
+        usage=artifact.usage,
+        usage_source="provider",
+        requested_alias=artifact.requested_alias,
+        response_model_id_raw=artifact.response_model_ids_raw[0],
+        identity_verified=False,
+    )
 
 
 def test_gate_a_profile_is_1544_calls() -> None:
@@ -64,6 +146,541 @@ def test_schedule_is_deterministic_cyclic_and_interleaved() -> None:
             base[claim_index % 3 :] + base[: claim_index % 3]
         )
     assert schedule == build_dev_schedule(claims, seed=20260817, campaign_id="campaign")
+
+
+def test_campaign_schedule_uses_frozen_stability_manifest_order() -> None:
+    dev_claims = [{"claim_id": f"dev-{index}"} for index in range(21)]
+    stability_claims = [
+        {"claim_id": claim_id}
+        for claim_id in ["dev-20", *[f"dev-{index}" for index in range(1, 20)]]
+    ]
+
+    schedule, links = build_campaign_schedule(
+        dev_claims,
+        stability_runtime_claims=stability_claims,
+        seed=20260817,
+        campaign_id="campaign",
+    )
+
+    expected = [claim["claim_id"] for claim in stability_claims]
+    assert [link["claim_id"] for link in links] == expected
+    assert [item.claim_id for item in schedule[len(dev_claims) * 3 :: 2]] == expected
+
+
+@pytest.mark.parametrize("count", [19, 21])
+def test_campaign_schedule_requires_exactly_twenty_stability_claims(count: int) -> None:
+    dev_claims = [{"claim_id": f"dev-{index}"} for index in range(21)]
+
+    with pytest.raises(ValueError, match="exactly 20"):
+        build_campaign_schedule(
+            dev_claims,
+            stability_runtime_claims=dev_claims[:count],
+            seed=20260817,
+        )
+
+
+def test_campaign_schedule_rejects_duplicate_stability_claim_ids() -> None:
+    dev_claims = [{"claim_id": f"dev-{index}"} for index in range(21)]
+    stability_claims = [*dev_claims[:19], dev_claims[0]]
+
+    with pytest.raises(ValueError, match="unique"):
+        build_campaign_schedule(
+            dev_claims,
+            stability_runtime_claims=stability_claims,
+            seed=20260817,
+        )
+
+
+def test_campaign_schedule_rejects_stability_claim_missing_from_dev() -> None:
+    dev_claims = [{"claim_id": f"dev-{index}"} for index in range(20)]
+    stability_claims = [*dev_claims[:19], {"claim_id": "outside-dev"}]
+
+    with pytest.raises(ValueError, match="subset"):
+        build_campaign_schedule(
+            dev_claims,
+            stability_runtime_claims=stability_claims,
+            seed=20260817,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["count", "order", "run_id", "relpath"])
+async def test_resume_rejects_state_items_that_do_not_match_plan(
+    tmp_path: Path, campaign_factory, mutation: str
+) -> None:
+    await _persist_interrupted_after_one(tmp_path, campaign_factory)
+    payload = _load_state_payload(tmp_path)
+    items = payload["items"]
+    assert isinstance(items, list)
+    if mutation == "count":
+        items.pop()
+    elif mutation == "order":
+        items[1], items[2] = items[2], items[1]
+    elif mutation == "run_id":
+        items[1]["run_id"] = "f" * 64
+    else:
+        items[1]["artifact_relpath"] = "artifacts/unexpected.json"
+    _write_state_payload(tmp_path, payload)
+    executor = campaign_factory.executor()
+
+    with pytest.raises(ValueError, match="campaign state items"):
+        await CampaignRunner(tmp_path, executor).resume(
+            expected_identity=campaign_factory.freeze_identity()
+        )
+
+    assert executor.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_missing_recorded_artifact_before_execution(
+    tmp_path: Path, campaign_factory
+) -> None:
+    await _persist_interrupted_after_one(tmp_path, campaign_factory)
+    state = _load_state(tmp_path)
+    completed = next(item for item in state.items if item.artifact_sha256 is not None)
+    (tmp_path / completed.artifact_relpath).unlink()
+    executor = campaign_factory.executor()
+
+    with pytest.raises(FileNotFoundError, match=completed.run_id):
+        await CampaignRunner(tmp_path, executor).resume(
+            expected_identity=campaign_factory.freeze_identity()
+        )
+
+    assert executor.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_valid_artifact_file_without_state_hash(
+    tmp_path: Path, campaign_factory
+) -> None:
+    await _persist_interrupted_after_one(tmp_path, campaign_factory)
+    state = _load_state(tmp_path)
+    orphan_item = next(item for item in state.items if item.status is WorkStatus.INTERRUPTED)
+    work = next(
+        item for item in campaign_factory.plan().schedule if item.run_id == orphan_item.run_id
+    )
+    artifact = await campaign_factory.executor()(work)
+    atomic_write_json(
+        tmp_path / orphan_item.artifact_relpath,
+        artifact.model_dump(mode="json"),
+    )
+    executor = campaign_factory.executor()
+
+    with pytest.raises(FreezeMismatch, match="unlinked_artifact"):
+        await CampaignRunner(tmp_path, executor).resume(
+            expected_identity=campaign_factory.freeze_identity()
+        )
+
+    assert executor.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_state_artifact_sha_mismatch_before_execution(
+    tmp_path: Path, campaign_factory
+) -> None:
+    await _persist_interrupted_after_one(tmp_path, campaign_factory)
+    payload = _load_state_payload(tmp_path)
+    items = payload["items"]
+    assert isinstance(items, list)
+    completed = next(item for item in items if item["artifact_sha256"] is not None)
+    completed["artifact_sha256"] = "0" * 64
+    _write_state_payload(tmp_path, payload)
+    executor = campaign_factory.executor()
+
+    with pytest.raises(FreezeMismatch, match="artifact_sha256"):
+        await CampaignRunner(tmp_path, executor).resume(
+            expected_identity=campaign_factory.freeze_identity()
+        )
+
+    assert executor.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_artifact_identity_mismatch_before_execution(
+    tmp_path: Path, campaign_factory
+) -> None:
+    await _persist_interrupted_after_one(tmp_path, campaign_factory)
+    state_payload = _load_state_payload(tmp_path)
+    items = state_payload["items"]
+    assert isinstance(items, list)
+    completed = next(item for item in items if item["artifact_sha256"] is not None)
+    artifact_path = tmp_path / completed["artifact_relpath"]
+    artifact_payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact_payload["campaign_id"] = "different-campaign"
+    artifact_payload["artifact_sha256"] = artifact_fingerprint(artifact_payload)
+    completed["artifact_sha256"] = artifact_payload["artifact_sha256"]
+    baselines = state_payload["stability_repeat_zero_artifact_sha256s"]
+    if artifact_payload["claim_id"] in baselines:
+        baselines[artifact_payload["claim_id"]] = artifact_payload["artifact_sha256"]
+    atomic_write_json(artifact_path, artifact_payload)
+    _write_state_payload(tmp_path, state_payload)
+    executor = campaign_factory.executor()
+
+    with pytest.raises(ValueError, match="artifact identity"):
+        await CampaignRunner(tmp_path, executor).resume(
+            expected_identity=campaign_factory.freeze_identity()
+        )
+
+    assert executor.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_multiple_running_items_as_corruption(
+    tmp_path: Path, campaign_factory
+) -> None:
+    await _persist_interrupted_after_one(tmp_path, campaign_factory)
+    payload = _load_state_payload(tmp_path)
+    items = payload["items"]
+    assert isinstance(items, list)
+    for item in items[1:3]:
+        item.update(status="running", stop_reason=None, interrupted_at=None, resumed_at=None)
+    payload.update(status="running", stop_reason=None)
+    _write_state_payload(tmp_path, payload)
+    executor = campaign_factory.executor()
+
+    with pytest.raises(ValueError, match="multiple running"):
+        await CampaignRunner(tmp_path, executor).resume(
+            expected_identity=campaign_factory.freeze_identity()
+        )
+
+    assert executor.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_normalizes_one_running_item(
+    tmp_path: Path, campaign_factory
+) -> None:
+    await _persist_interrupted_after_one(tmp_path, campaign_factory)
+    payload = _load_state_payload(tmp_path)
+    items = payload["items"]
+    assert isinstance(items, list)
+    items[1].update(status="running", stop_reason=None, interrupted_at=None, resumed_at=None)
+    payload.update(status="running", stop_reason=None)
+    _write_state_payload(tmp_path, payload)
+    executor = campaign_factory.executor()
+
+    state = await CampaignRunner(tmp_path, executor).resume(
+        expected_identity=campaign_factory.freeze_identity()
+    )
+
+    assert state.status is CampaignStatus.COMPLETE
+    assert state.items[1].resumed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_running_normalization_does_not_reset_historical_interrupted_item(
+    tmp_path: Path, campaign_factory
+) -> None:
+    await _persist_interrupted_after_one(tmp_path, campaign_factory)
+    payload = _load_state_payload(tmp_path)
+    items = payload["items"]
+    assert isinstance(items, list)
+    items[1].update(status="running", stop_reason=None, interrupted_at=None, resumed_at=None)
+    items[2].update(
+        status="interrupted",
+        stop_reason="process_interruption",
+        interrupted_at="2026-08-19T00:00:00+00:00",
+        resumed_at=None,
+    )
+    payload.update(status="running", stop_reason=None)
+    _write_state_payload(tmp_path, payload)
+
+    async def interrupt_normalized_item(_item):
+        raise CampaignProcessInterruption("stop after normalization")
+
+    with pytest.raises(CampaignProcessInterruption, match="stop after normalization"):
+        await CampaignRunner(tmp_path, interrupt_normalized_item).resume(
+            expected_identity=campaign_factory.freeze_identity()
+        )
+
+    reloaded = _load_state(tmp_path)
+    historical = reloaded.items[2]
+    assert historical.status is WorkStatus.INTERRUPTED
+    assert historical.stop_reason is CampaignStopReason.PROCESS_INTERRUPTION
+    assert historical.interrupted_at == "2026-08-19T00:00:00+00:00"
+    assert historical.resumed_at is None
+
+
+@pytest.mark.asyncio
+async def test_new_artifact_alias_must_match_frozen_plan_before_persistence(
+    tmp_path: Path, campaign_factory
+) -> None:
+    plan = campaign_factory.plan()
+    underlying = campaign_factory.executor()
+    calls = 0
+
+    async def executor(item):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise AssertionError("identity check must stop before a second work item")
+        artifact = await underlying(item)
+        payload = artifact.model_dump(mode="json")
+        payload["requested_alias"] = "different-alias"
+        payload["artifact_sha256"] = artifact_fingerprint(payload)
+        return RunArtifact.model_validate(payload)
+
+    with pytest.raises(ValueError, match="artifact identity"):
+        await CampaignRunner(tmp_path, executor).run(plan)
+
+    first = plan.schedule[0]
+    assert not (tmp_path / f"artifacts/{first.run_id}.json").exists()
+    state = _load_state(tmp_path)
+    assert state.items[0].status is WorkStatus.RUNNING
+    assert state.items[0].artifact_sha256 is None
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_identity_failure_after_completed_call_keeps_ledger_accounting_auditable(
+    tmp_path: Path, campaign_factory
+) -> None:
+    plan = campaign_factory.plan()
+    store = _run_store(tmp_path / "run-store.sqlite3", plan.activity_id)
+    underlying = campaign_factory.executor()
+
+    async def executor(item):
+        artifact = await underlying(item)
+        _record_artifact_call(store, artifact)
+        payload = artifact.model_dump(mode="json")
+        payload["requested_alias"] = "wrong-alias"
+        payload["artifact_sha256"] = artifact_fingerprint(payload)
+        return RunArtifact.model_validate(payload)
+
+    with pytest.raises(ValueError, match="artifact identity"):
+        await CampaignRunner(tmp_path / "campaign", executor, run_store=store).run(plan)
+
+    first = plan.schedule[0]
+    assert not (
+        tmp_path / "campaign" / f"artifacts/{first.run_id}.json"
+    ).exists()
+    state = _load_state(tmp_path / "campaign")
+    assert state.items[0].status is WorkStatus.RUNNING
+    assert state.items[0].artifact_sha256 is None
+    summary = store.summarize_run(first.run_id)
+    assert summary.call_ids == [f"call-{first.run_id}"]
+    assert summary.usage.complete is True
+
+
+@pytest.mark.asyncio
+async def test_artifact_identity_mismatch_precedes_ledger_alias_drift(
+    tmp_path: Path, campaign_factory
+) -> None:
+    plan = campaign_factory.plan()
+    store = _run_store(tmp_path / "run-store.sqlite3", plan.activity_id)
+    underlying = campaign_factory.executor()
+
+    async def executor(item):
+        artifact = await underlying(item)
+        _record_artifact_call(store, artifact)
+        connection = store._connect()
+        try:
+            connection.execute(
+                "UPDATE calls SET requested_alias = 'ledger-drift' WHERE run_id = ?",
+                (item.run_id,),
+            )
+        finally:
+            connection.close()
+        payload = artifact.model_dump(mode="json")
+        payload["requested_alias"] = "wrong-alias"
+        payload["artifact_sha256"] = artifact_fingerprint(payload)
+        return RunArtifact.model_validate(payload)
+
+    with pytest.raises(ValueError, match="artifact identity"):
+        await CampaignRunner(tmp_path / "campaign", executor, run_store=store).run(plan)
+
+    first = plan.schedule[0]
+    assert not (
+        tmp_path / "campaign" / f"artifacts/{first.run_id}.json"
+    ).exists()
+    state = _load_state(tmp_path / "campaign")
+    assert state.items[0].status is WorkStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_executor_artifact_that_disagrees_with_run_store(
+    tmp_path: Path, campaign_factory
+) -> None:
+    plan = campaign_factory.plan()
+    store = _run_store(tmp_path / "run-store.sqlite3", plan.activity_id)
+    underlying = campaign_factory.executor()
+
+    async def executor(item):
+        artifact = await underlying(item)
+        _record_artifact_call(store, artifact)
+        payload = artifact.model_dump(mode="json")
+        payload.update(
+            actual_cost_micro_cny=2,
+            known_actual_cost_micro_cny=2,
+            committed_cost_micro_cny=2,
+        )
+        payload["artifact_sha256"] = artifact_fingerprint(payload)
+        return RunArtifact.model_validate(payload)
+
+    with pytest.raises(FreezeMismatch, match="actual_cost_micro_cny"):
+        await CampaignRunner(tmp_path / "campaign", executor, run_store=store).run(plan)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("unresolved_state", "expected_status", "expected_reason"),
+    [
+        ("reserved", CampaignStatus.INCOMPLETE_USAGE, CampaignStopReason.USAGE_MISSING),
+        (
+            "sent",
+            CampaignStatus.INCOMPLETE_COST_UNCERTAIN,
+            CampaignStopReason.BILLING_UNCERTAIN,
+        ),
+        (
+            "billing_uncertain",
+            CampaignStatus.INCOMPLETE_COST_UNCERTAIN,
+            CampaignStopReason.BILLING_UNCERTAIN,
+        ),
+    ],
+)
+async def test_mixed_completed_and_unresolved_accounting_stops_campaign(
+    tmp_path: Path,
+    campaign_factory,
+    unresolved_state: str,
+    expected_status: CampaignStatus,
+    expected_reason: CampaignStopReason,
+) -> None:
+    plan = campaign_factory.plan()
+    store = _run_store(tmp_path / "run-store.sqlite3", plan.activity_id)
+    underlying = campaign_factory.executor()
+    calls = 0
+
+    async def executor(item):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise AssertionError("incomplete accounting must stop after its work item")
+        artifact = await underlying(item)
+        _record_artifact_call(store, artifact)
+        unresolved_id = f"unresolved-{item.run_id}"
+        store.reserve_call(
+            unresolved_id,
+            request_sha256=hashlib.sha256(unresolved_id.encode()).hexdigest(),
+            run_id=item.run_id,
+            node="worker",
+            task_id="unresolved",
+            logical_attempt=0,
+            max_input_tokens=1,
+            max_output_tokens=0,
+        )
+        if unresolved_state in {"sent", "billing_uncertain"}:
+            store.mark_sent(unresolved_id)
+        if unresolved_state == "billing_uncertain":
+            store.mark_billing_uncertain(unresolved_id)
+        return build_run_artifact(
+            activity_id=plan.activity_id,
+            campaign_id=plan.campaign_id,
+            phase=item.phase,
+            run_id=item.run_id,
+            claim_id=item.claim_id,
+            strategy=item.strategy,
+            repeat=item.repeat,
+            result=artifact.result,
+            summary=store.summarize_run(item.run_id),
+            requested_alias=plan.freeze.requested_alias,
+            price_config_id=store.pricing.config_id,
+            latency=artifact.latency,
+        )
+
+    state = await CampaignRunner(
+        tmp_path / "campaign", executor, run_store=store
+    ).run(plan)
+
+    assert state.status is expected_status
+    assert state.stop_reason is expected_reason
+    assert state.items[0].status is WorkStatus.STOPPED
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_ledger_cannot_hide_nonzero_artifact_accounting(
+    tmp_path: Path, campaign_factory
+) -> None:
+    plan = campaign_factory.plan()
+    store = _run_store(tmp_path / "run-store.sqlite3", plan.activity_id)
+    underlying = campaign_factory.executor()
+
+    async def executor(item):
+        artifact = await underlying(item)
+        payload = artifact.model_dump(mode="json")
+        payload["call_ids"] = []
+        payload["usage"] = {
+            "input_tokens": 1,
+            "output_tokens": 0,
+            "total_tokens": 1,
+            "complete": False,
+        }
+        payload["result"]["usage"] = payload["usage"]
+        payload["usage_source"] = "missing"
+        payload["actual_cost_micro_cny"] = None
+        payload["known_actual_cost_micro_cny"] = 0
+        payload["committed_cost_micro_cny"] = 0
+        payload["cost_is_lower_bound"] = True
+        payload["fresh_call_count"] = 0
+        payload["response_model_ids_raw"] = []
+        payload["diagnostic_only"] = True
+        payload["artifact_sha256"] = artifact_fingerprint(payload)
+        return RunArtifact.model_validate(payload)
+
+    with pytest.raises(FreezeMismatch, match="zero_call_accounting"):
+        await CampaignRunner(tmp_path / "campaign", executor, run_store=store).run(plan)
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_run_store_rows_missing_from_artifact(
+    tmp_path: Path, campaign_factory
+) -> None:
+    plan = campaign_factory.plan()
+    campaign_root = tmp_path / "campaign"
+    store = _run_store(tmp_path / "run-store.sqlite3", plan.activity_id)
+    underlying = campaign_factory.executor(fail_after=1)
+
+    async def executor(item):
+        artifact = await underlying(item)
+        _record_artifact_call(store, artifact)
+        return artifact
+
+    await _persist_interrupted_after_one(
+        campaign_root,
+        campaign_factory,
+        run_store=store,
+        executor=executor,
+    )
+    state = _load_state(campaign_root)
+    completed = next(item for item in state.items if item.artifact_sha256 is not None)
+    artifact = RunArtifact.model_validate_json(
+        (campaign_root / completed.artifact_relpath).read_text(encoding="utf-8")
+    )
+    _record_artifact_call(store, artifact, suffix="-late")
+    resume_executor = campaign_factory.executor()
+
+    with pytest.raises(FreezeMismatch, match="call_ids"):
+        await CampaignRunner(campaign_root, resume_executor, run_store=store).resume(
+            expected_identity=campaign_factory.freeze_identity()
+        )
+
+    assert resume_executor.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_run_store_for_another_activity(
+    tmp_path: Path, campaign_factory
+) -> None:
+    await _persist_interrupted_after_one(tmp_path, campaign_factory)
+    wrong_store = _run_store(tmp_path / "wrong.sqlite3", "different-activity")
+    executor = campaign_factory.executor()
+
+    with pytest.raises(FreezeMismatch, match="run_store.activity_id"):
+        await CampaignRunner(tmp_path, executor, run_store=wrong_store).resume(
+            expected_identity=campaign_factory.freeze_identity()
+        )
+
+    assert executor.calls == 0
 
 
 @pytest.mark.asyncio
@@ -159,3 +776,26 @@ async def test_typed_process_interruption_remains_resumable(
         (tmp_path / "campaign.json").read_text(encoding="utf-8")
     )
     assert state.status is CampaignStatus.INTERRUPTED
+
+
+@pytest.mark.asyncio
+async def test_fresh_artifact_alias_mismatch_is_rejected_before_persisting(
+    tmp_path: Path, campaign_factory
+) -> None:
+    underlying = campaign_factory.executor()
+
+    async def executor(item):
+        artifact = await underlying(item)
+        payload = artifact.model_dump(mode="json")
+        payload["requested_alias"] = "wrong-alias"
+        payload["artifact_sha256"] = artifact_fingerprint(payload)
+        return RunArtifact.model_validate(payload)
+
+    with pytest.raises(ValueError, match="artifact identity"):
+        await CampaignRunner(tmp_path, executor).run(campaign_factory.plan())
+
+    state = CampaignState.model_validate_json(
+        (tmp_path / "campaign.json").read_text(encoding="utf-8")
+    )
+    assert state.items[0].status is WorkStatus.RUNNING
+    assert not (tmp_path / "artifacts" / f"{state.items[0].run_id}.json").exists()
