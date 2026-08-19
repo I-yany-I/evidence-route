@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from evidence_route.artifacts import SQLiteRunStore, TraceWriter
+from evidence_route.artifacts import RunCallSummary, SQLiteRunStore, TraceWriter
 from evidence_route.budget import PriceConfig
 from evidence_route.config import AppConfig
-from evidence_route.contracts import Strategy
+from evidence_route.contracts import ClaimFeatures, Strategy, VerificationResult
 from evidence_route.evaluation.activity import (
     CallBounds,
     CampaignPlan,
@@ -23,6 +23,11 @@ from evidence_route.evaluation.activity import (
     StabilityBaselineLink,
     campaign_fingerprint,
     derive_run_id,
+)
+from evidence_route.evaluation.calibration import (
+    CalibrationRuntimeCase,
+    CalibrationWorkItem,
+    runtime_case_fingerprint,
 )
 from evidence_route.evaluation.runner import build_dev_schedule
 from evidence_route.execution import build_run_artifact
@@ -123,6 +128,116 @@ def build_campaign_plan(
     return CampaignPlan.model_validate(payload)
 
 
+def _require_complete_summary(
+    summary: RunCallSummary,
+    *,
+    requested_alias: str,
+    label: str,
+) -> None:
+    if (
+        not summary.call_ids
+        or not summary.usage.complete
+        or summary.actual_cost_micro_cny is None
+        or summary.cost_is_lower_bound
+        or summary.billing_uncertain
+    ):
+        raise ValueError(f"{label} calibration accounting is incomplete")
+    if summary.requested_aliases != [requested_alias]:
+        raise ValueError(f"{label} calibration alias differs from the frozen alias")
+    if len(summary.response_model_ids_raw) != 1:
+        raise ValueError(f"{label} calibration requires exactly one raw model ID")
+
+
+def _bind_result_summary(
+    result: VerificationResult,
+    summary: RunCallSummary,
+    *,
+    price_config_id: str,
+) -> VerificationResult:
+    updated = result.model_copy(
+        update={
+            "usage": summary.usage,
+            "estimated_cost_micro_cny": summary.actual_cost_micro_cny,
+            "cost_currency": "CNY",
+            "price_config_id": price_config_id,
+        }
+    )
+    return VerificationResult.model_validate(updated.model_dump(mode="python"))
+
+
+def build_calibration_runtime_case(
+    *,
+    work: CalibrationWorkItem,
+    runtime_manifest_sha256: str,
+    features: ClaimFeatures,
+    saved_llm_route: Literal["single", "multi"],
+    router_summary: RunCallSummary,
+    single_result: VerificationResult,
+    single_summary: RunCallSummary,
+    multi_result: VerificationResult,
+    multi_summary: RunCallSummary,
+    requested_alias: str,
+    price_config_id: str,
+) -> CalibrationRuntimeCase:
+    """Bind one calibration case exclusively to persisted call-store accounting."""
+
+    summaries = {
+        "router": router_summary,
+        "single": single_summary,
+        "multi": multi_summary,
+    }
+    for label, summary in summaries.items():
+        _require_complete_summary(
+            summary,
+            requested_alias=requested_alias,
+            label=label,
+        )
+    model_ids = {
+        model_id
+        for summary in summaries.values()
+        for model_id in summary.response_model_ids_raw
+    }
+    if len(model_ids) != 1:
+        raise ValueError("calibration model drift detected across saved paths")
+    call_ids = [
+        call_id
+        for summary in summaries.values()
+        for call_id in summary.call_ids
+    ]
+    if len(call_ids) != len(set(call_ids)):
+        raise ValueError("calibration call IDs must be unique across saved paths")
+
+    payload = {
+        "claim_id": work.claim_id,
+        "case_id": work.case_id,
+        "router_run_id": work.router_run_id,
+        "single_run_id": work.single_run_id,
+        "multi_run_id": work.multi_run_id,
+        "call_ids": call_ids,
+        "runtime_manifest_sha256": runtime_manifest_sha256,
+        "features": features.model_dump(mode="json"),
+        "saved_llm_route": saved_llm_route,
+        "router_usage": router_summary.usage.model_dump(mode="json"),
+        "router_actual_cost_micro_cny": router_summary.actual_cost_micro_cny,
+        "single_result": _bind_result_summary(
+            single_result,
+            single_summary,
+            price_config_id=price_config_id,
+        ).model_dump(mode="json"),
+        "multi_result": _bind_result_summary(
+            multi_result,
+            multi_summary,
+            price_config_id=price_config_id,
+        ).model_dump(mode="json"),
+        "requested_alias": requested_alias,
+        "response_model_ids_raw": sorted(model_ids),
+        "identity_verified": False,
+        "artifact_sha256": "0" * 64,
+    }
+    payload["artifact_sha256"] = runtime_case_fingerprint(payload)
+    return CalibrationRuntimeCase.model_validate(payload)
+
+
 class GraphCampaignExecutor:
     """Execute one immutable campaign item through the production LangGraph."""
 
@@ -178,22 +293,30 @@ class GraphCampaignExecutor:
             trace=TraceWriter(self.trace_dir / "graph.jsonl"),
         )
 
-    async def __call__(self, work: CampaignWorkItem) -> RunArtifact:
+    async def execute(
+        self,
+        *,
+        run_id: str,
+        claim_id: str,
+        strategy: Strategy,
+        phase: Literal["calibration", "dev", "stability"],
+        repeat: int,
+    ) -> RunArtifact:
         try:
-            claim = self.claims[work.claim_id]
+            claim = self.claims[claim_id]
         except KeyError as exc:
             raise ValueError(
-                f"scheduled claim is absent from runtime manifests: {work.claim_id}"
+                f"scheduled claim is absent from runtime manifests: {claim_id}"
             ) from exc
 
-        graph_config = {"configurable": {"thread_id": work.run_id}}
+        graph_config = {"configurable": {"thread_id": run_id}}
         async with AsyncSqliteSaver.from_conn_string(str(self.checkpoint_db)) as saver:
             saver.serde = JsonPlusSerializer(pickle_fallback=True)
             graph = build_graph(self.components, checkpointer=saver)
             snapshot = await graph.aget_state(graph_config)
             values = getattr(snapshot, "values", None) or {}
             if values:
-                if values.get("claim_id") != work.claim_id:
+                if values.get("claim_id") != claim_id:
                     raise ValueError("checkpoint claim_id differs from scheduled work")
                 if values.get("claim_text") != claim:
                     raise ValueError("checkpoint claim text differs from runtime manifest")
@@ -201,15 +324,15 @@ class GraphCampaignExecutor:
                     checkpoint_strategy = Strategy(str(values.get("strategy")))
                 except ValueError as exc:
                     raise ValueError("checkpoint strategy is invalid") from exc
-                if checkpoint_strategy is not work.strategy:
+                if checkpoint_strategy is not strategy:
                     raise ValueError("checkpoint strategy differs from scheduled work")
                 input_state = None
             else:
                 input_state = initial_state(
-                    work.run_id,
-                    work.claim_id,
+                    run_id,
+                    claim_id,
                     claim,
-                    work.strategy,
+                    strategy,
                 )
             if values and not getattr(snapshot, "next", ()):
                 state = values
@@ -219,7 +342,7 @@ class GraphCampaignExecutor:
         result = state.get("final_result")
         if result is None:
             raise ValueError("campaign graph completed without final_result")
-        summary = self.run_store.summarize_run(work.run_id)
+        summary = self.run_store.summarize_run(run_id)
         node_ms = sum(item.latency_ms for item in state.get("node_timings", []))
         latency = LatencyBreakdown(
             fresh_end_to_end_ms=node_ms,
@@ -233,11 +356,11 @@ class GraphCampaignExecutor:
         return build_run_artifact(
             activity_id=self.activity_id,
             campaign_id=self.campaign_id,
-            phase=work.phase,
-            run_id=work.run_id,
-            claim_id=work.claim_id,
-            strategy=work.strategy,
-            repeat=work.repeat,
+            phase=phase,
+            run_id=run_id,
+            claim_id=claim_id,
+            strategy=strategy,
+            repeat=repeat,
             result=result,
             summary=summary,
             requested_alias=self.app_config.llm.requested_alias,
@@ -245,9 +368,19 @@ class GraphCampaignExecutor:
             latency=latency,
         )
 
+    async def __call__(self, work: CampaignWorkItem) -> RunArtifact:
+        return await self.execute(
+            run_id=work.run_id,
+            claim_id=work.claim_id,
+            strategy=work.strategy,
+            phase=work.phase,
+            repeat=work.repeat,
+        )
+
 
 __all__ = [
     "GraphCampaignExecutor",
+    "build_calibration_runtime_case",
     "build_campaign_plan",
     "validate_gate_a_cohorts",
 ]

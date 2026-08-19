@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from evidence_route.artifacts import SQLiteRunStore
+from evidence_route.artifacts import RunCallSummary, SQLiteRunStore
 from evidence_route.config import load_app_config, stable_hash
 from evidence_route.evaluation.activity import (
     CallBounds,
@@ -17,11 +17,14 @@ from evidence_route.evaluation.activity import (
 )
 from evidence_route.evaluation.production import (
     GraphCampaignExecutor,
+    build_calibration_runtime_case,
     build_campaign_plan,
     validate_gate_a_cohorts,
 )
 from evidence_route.execution import load_price_config
 from evidence_route.llm import RawCompletion
+
+pytest_plugins = ["tests.fixtures.evaluation.factories"]
 
 
 def _freeze() -> FreezeIdentity:
@@ -199,3 +202,100 @@ async def test_graph_campaign_executor_returns_accounted_artifact_and_reuses_che
     assert first.response_model_ids_raw == ["relay-model-a"]
     assert first.call_ids == second.call_ids
     assert transport.calls == 1
+
+
+def _summary(call_id: str, tokens: int, cost: int) -> RunCallSummary:
+    return RunCallSummary(
+        call_ids=[call_id],
+        usage={
+            "input_tokens": tokens - 1,
+            "output_tokens": 1,
+            "total_tokens": tokens,
+            "complete": True,
+        },
+        actual_cost_micro_cny=cost,
+        known_actual_cost_micro_cny=cost,
+        committed_cost_micro_cny=cost,
+        cost_is_lower_bound=False,
+        fresh_call_count=1,
+        cache_hit_count=0,
+        transport_attempts=1,
+        requested_aliases=["relay-model"],
+        response_model_ids_raw=["relay-model-a"],
+        usage_sources=["provider"],
+        identity_verified=False,
+        billing_uncertain=False,
+    )
+
+
+def test_calibration_runtime_case_uses_only_persisted_accounting(
+    calibration_case,
+) -> None:
+    plan = __import__(
+        "evidence_route.evaluation.calibration", fromlist=["build_calibration_plan"]
+    ).build_calibration_plan(
+        [SimpleNamespace(claim_id=f"train-{index}", split="train") for index in range(32)],
+        activity_id="activity",
+        manifest_freeze_git_sha="1" * 40,
+        runtime_manifest_sha256="a" * 64,
+        corpus_preparation_receipt_sha256="b" * 64,
+        prompt_bundle_sha256="c" * 64,
+        config_sha256="d" * 64,
+        pricing_sha256="e" * 64,
+        endpoint_config_sha256="f" * 64,
+        requirements_lock_sha256="0" * 64,
+        requested_alias="relay-model",
+        seed=20260817,
+        cap_micro_cny=350_000_000,
+    )
+    work = plan.items[0]
+    case = build_calibration_runtime_case(
+        work=work,
+        runtime_manifest_sha256=plan.runtime_manifest_sha256,
+        features=calibration_case.runtime.features,
+        saved_llm_route="single",
+        router_summary=_summary("router-call", 5, 7),
+        single_result=calibration_case.runtime.single_result,
+        single_summary=_summary("single-call", 10, 11),
+        multi_result=calibration_case.runtime.multi_result,
+        multi_summary=_summary("multi-call", 20, 23),
+        requested_alias="relay-model",
+        price_config_id="9" * 64,
+    )
+
+    assert case.call_ids == ["router-call", "single-call", "multi-call"]
+    assert case.router_usage.total_tokens == 5
+    assert case.router_actual_cost_micro_cny == 7
+    assert case.single_result.estimated_cost_micro_cny == 11
+    assert case.multi_result.estimated_cost_micro_cny == 23
+    assert case.response_model_ids_raw == ["relay-model-a"]
+
+
+def test_calibration_runtime_case_rejects_model_drift(calibration_case) -> None:
+    from evidence_route.evaluation.calibration import CalibrationWorkItem
+
+    work = CalibrationWorkItem(
+        order=0,
+        claim_id="train-0",
+        case_id="a" * 64,
+        router_run_id="b" * 64,
+        single_run_id="c" * 64,
+        multi_run_id="d" * 64,
+    )
+    drifted = _summary("multi-call", 20, 23).model_copy(
+        update={"response_model_ids_raw": ["relay-model-b"]}
+    )
+    with pytest.raises(ValueError, match="model drift"):
+        build_calibration_runtime_case(
+            work=work,
+            runtime_manifest_sha256="e" * 64,
+            features=calibration_case.runtime.features,
+            saved_llm_route="single",
+            router_summary=_summary("router-call", 5, 7),
+            single_result=calibration_case.runtime.single_result,
+            single_summary=_summary("single-call", 10, 11),
+            multi_result=calibration_case.runtime.multi_result,
+            multi_summary=drifted,
+            requested_alias="relay-model",
+            price_config_id="9" * 64,
+        )
