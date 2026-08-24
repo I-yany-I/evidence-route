@@ -453,6 +453,28 @@ def _serialised_corpus(records: Iterable[Mapping[str, str]]) -> tuple[bytes, int
         return spool.read(), count
 
 
+def _serialise_corpus_to_file(
+    records: Iterable[Mapping[str, str]], path: Path
+) -> tuple[str, int, int]:
+    digest = hashlib.sha256()
+    count = 0
+    byte_count = 0
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as output:
+        for record in records:
+            if set(record) != {"evidence_id", "title", "source_url", "text", "snapshot_sha256"}:
+                raise ValueError("normalized corpus contains an unexpected field")
+            line = _canonical_json_bytes(dict(record)) + b"\n"
+            output.write(line)
+            digest.update(line)
+            byte_count += len(line)
+            count += 1
+    if count == 0:
+        path.unlink(missing_ok=True)
+        raise ValueError("selected claim has no non-empty public evidence")
+    return digest.hexdigest(), byte_count, count
+
+
 def _atomic_write(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -624,7 +646,8 @@ def _close_context(value: object) -> None:
 
 
 def _make_runtime_item(
-    runtime: Mapping[str, object], *, corpus_payload: bytes, corpus_relpath: str, record_count: int
+    runtime: Mapping[str, object], *, corpus_sha256: str, corpus_bytes: int,
+    corpus_relpath: str, record_count: int
 ) -> dict[str, object]:
     claim = runtime["claim"]
     if not isinstance(claim, str):
@@ -634,8 +657,8 @@ def _make_runtime_item(
         {
             "claim_sha256": _sha256(claim.encode("utf-8")),
             "corpus_relpath": corpus_relpath,
-            "corpus_sha256": _sha256(corpus_payload),
-            "corpus_bytes": len(corpus_payload),
+            "corpus_sha256": corpus_sha256,
+            "corpus_bytes": corpus_bytes,
             "corpus_records": record_count,
         }
     )
@@ -820,18 +843,18 @@ def prepare_dataset(
                         max_uncompressed_bytes=max_member_uncompressed_bytes,
                     )
                     source_records = _iter_jsonl_member(payload, member_name=normalised_member)
-                    evidence_payload, record_count = _serialised_corpus(
-                        normalize_member(split, original_id, source_records)
-                    )
                     corpus_relpath = f"{split}-{original_id}.jsonl"
                     staged_path = stage_corpora / corpus_relpath
-                    _atomic_write(staged_path, evidence_payload)
+                    corpus_sha256, corpus_bytes, record_count = _serialise_corpus_to_file(
+                        normalize_member(split, original_id, source_records), staged_path
+                    )
                     _atomic_write(
                         staged_path.with_suffix(staged_path.suffix + ".sha256"),
-                        (_sha256(evidence_payload) + "\n").encode("ascii"),
+                        (corpus_sha256 + "\n").encode("ascii"),
                     )
                     corpus_meta[(split, original_id)] = {
-                        "payload": evidence_payload,
+                        "corpus_sha256": corpus_sha256,
+                        "corpus_bytes": corpus_bytes,
                         "record_count": record_count,
                         "corpus_relpath": corpus_relpath,
                     }
@@ -854,8 +877,8 @@ def prepare_dataset(
                             ),
                             "member_sha256": _sha256(payload),
                             "corpus_relpath": corpus_relpath,
-                            "corpus_sha256": _sha256(evidence_payload),
-                            "corpus_bytes": len(evidence_payload),
+                            "corpus_sha256": corpus_sha256,
+                            "corpus_bytes": corpus_bytes,
                             "corpus_records": record_count,
                         }
                     )
@@ -880,7 +903,8 @@ def prepare_dataset(
                 runtime_items.append(
                     _make_runtime_item(
                         runtime,
-                        corpus_payload=metadata["payload"],  # type: ignore[arg-type]
+                        corpus_sha256=str(metadata["corpus_sha256"]),
+                        corpus_bytes=int(metadata["corpus_bytes"]),
                         corpus_relpath=str(metadata["corpus_relpath"]),
                         record_count=int(metadata["record_count"]),
                     )
