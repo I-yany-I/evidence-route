@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import binascii
 import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -249,15 +250,15 @@ def _public_http_url(value: object) -> tuple[str, str]:
 
 
 def normalize_member(
-    split: str, original_id: int, source: Sequence[Mapping[str, object]]
+    split: str, original_id: int, source: Iterable[Mapping[str, object]]
 ) -> Iterator[dict[str, str]]:
     """Yield strict evidence records from one AVeriTeC JSONL member."""
 
     _validate_split(split)
     if not isinstance(original_id, int) or original_id < 0:
         raise ValueError("original_id must be a non-negative integer")
-    if not isinstance(source, Sequence) or isinstance(source, (str, bytes, bytearray)):
-        raise ValueError("AVeriTeC member must be a JSON array of source records")
+    if isinstance(source, (str, bytes, bytearray)):
+        raise ValueError("AVeriTeC member must be an iterable of source records")
     for source_index, item in enumerate(source):
         if not isinstance(item, Mapping):
             raise ValueError(f"member source record {source_index} is not an object")
@@ -404,35 +405,37 @@ def stream_selected_member(
     return payload
 
 
-def _parse_jsonl_member(payload: bytes, *, member_name: str) -> list[dict[str, object]]:
-    try:
-        text = payload.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"archive member is not UTF-8: {member_name}") from exc
-    rows: list[dict[str, object]] = []
+def _iter_jsonl_member(payload: bytes, *, member_name: str) -> Iterator[dict[str, object]]:
+    stream = io.BytesIO(payload)
+    found = False
     # Split only on the JSONL newline. ``str.splitlines`` also treats U+2028
     # and U+2029 as boundaries, but those code points may occur inside a JSON
     # string from a scraped page.
-    for line_number, line in enumerate(text.split("\n"), start=1):
+    for line_number, line in enumerate(iter(stream.readline, b""), start=1):
         if not line.strip():
             continue
         try:
             value = json.loads(line)
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"invalid JSONL at {member_name}:{line_number}") from exc
         if isinstance(value, dict):
-            rows.append(value)
+            found = True
+            yield value
         elif line_number == 1 and isinstance(value, list):
             # Some archived revisions contain one JSON array despite the JSONL-oriented
             # member name. Accept it only when every element is an object.
             if not all(isinstance(item, dict) for item in value):
                 raise ValueError(f"JSON array at {member_name}:1 contains a non-object")
-            rows.extend(value)
+            found = bool(value)
+            yield from value
         else:
             raise ValueError(f"JSONL row at {member_name}:{line_number} is not an object")
-    if not rows:
+    if not found:
         raise ValueError(f"archive member is empty: {member_name}")
-    return rows
+
+
+def _parse_jsonl_member(payload: bytes, *, member_name: str) -> list[dict[str, object]]:
+    return list(_iter_jsonl_member(payload, member_name=member_name))
 
 
 def _serialised_corpus(records: Iterable[Mapping[str, str]]) -> tuple[bytes, int]:
@@ -816,7 +819,7 @@ def prepare_dataset(
                         allowed=allowed,
                         max_uncompressed_bytes=max_member_uncompressed_bytes,
                     )
-                    source_records = _parse_jsonl_member(payload, member_name=normalised_member)
+                    source_records = _iter_jsonl_member(payload, member_name=normalised_member)
                     evidence_payload, record_count = _serialised_corpus(
                         normalize_member(split, original_id, source_records)
                     )

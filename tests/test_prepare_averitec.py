@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from scripts.prepare_averitec import (
+    _iter_jsonl_member,
     _parse_jsonl_member,
     _serialised_corpus,
     build_parser,
@@ -121,6 +122,14 @@ def test_jsonl_parser_preserves_unicode_line_separators_inside_text() -> None:
     ).encode("utf-8")
     rows = _parse_jsonl_member(payload, member_name="7.json")
     assert rows[0]["url2text"] == ["before\u2028after"]
+
+
+def test_jsonl_iterator_parses_records_incrementally() -> None:
+    payload = b'{"url":"https://example.org/a","url2text":["one"]}\n'
+
+    rows = list(_iter_jsonl_member(payload, member_name="7.json"))
+
+    assert rows == [{"url": "https://example.org/a", "url2text": ["one"]}]
 
 
 def test_member_guard_rejects_oversized_or_unlisted_entries() -> None:
