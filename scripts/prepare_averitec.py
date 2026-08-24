@@ -261,20 +261,25 @@ def normalize_member(
     for source_index, item in enumerate(source):
         if not isinstance(item, Mapping):
             raise ValueError(f"member source record {source_index} is not an object")
-        source_url, title = _public_http_url(item.get("url"))
         texts = item.get("url2text")
         if isinstance(texts, str):
             texts = [texts]
         if not isinstance(texts, Sequence) or isinstance(texts, (bytes, bytearray)):
             raise ValueError(f"member source record {source_index} url2text must be a list")
+        non_empty_texts: list[tuple[int, str]] = []
         for sentence_index, sentence in enumerate(texts):
             if not isinstance(sentence, str):
                 raise ValueError(
                     f"member source record {source_index} sentence {sentence_index} is not text"
                 )
             text = sentence.strip()
-            if not text:
-                continue
+            if text:
+                non_empty_texts.append((sentence_index, text))
+        if not non_empty_texts:
+            # AVeriTeC contains metadata-only placeholder rows with no evidence text.
+            continue
+        source_url, title = _public_http_url(item.get("url"))
+        for sentence_index, text in non_empty_texts:
             yield {
                 "evidence_id": f"av:{split}:{original_id}:{source_index}:{sentence_index}",
                 "title": title,

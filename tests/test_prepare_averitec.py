@@ -67,6 +67,23 @@ def test_member_normalization_discards_type_and_query() -> None:
     assert records[0]["evidence_id"] == "av:dev:7:0:0"
 
 
+def test_member_normalization_skips_empty_metadata_placeholder() -> None:
+    source = [
+        {"claim_id": "512", "type": "gold", "url": "Metadata", "url2text": []},
+        {
+            "claim_id": "512",
+            "type": "question",
+            "url": "https://example.org/a",
+            "url2text": ["text"],
+        },
+    ]
+
+    records = list(normalize_member("train", 512, source))
+
+    assert len(records) == 1
+    assert records[0]["source_url"] == "https://example.org/a"
+
+
 def test_jsonl_parser_preserves_unicode_line_separators_inside_text() -> None:
     payload = (
         json.dumps(
