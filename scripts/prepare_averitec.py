@@ -436,16 +436,18 @@ def _parse_jsonl_member(payload: bytes, *, member_name: str) -> list[dict[str, o
 
 
 def _serialised_corpus(records: Iterable[Mapping[str, str]]) -> tuple[bytes, int]:
-    lines: list[bytes] = []
     count = 0
-    for record in records:
-        if set(record) != {"evidence_id", "title", "source_url", "text", "snapshot_sha256"}:
-            raise ValueError("normalized corpus contains an unexpected field")
-        lines.append(_canonical_json_bytes(dict(record)) + b"\n")
-        count += 1
-    if not lines:
-        raise ValueError("selected claim has no non-empty public evidence")
-    return b"".join(lines), count
+    with tempfile.TemporaryFile(mode="w+b") as spool:
+        for record in records:
+            if set(record) != {"evidence_id", "title", "source_url", "text", "snapshot_sha256"}:
+                raise ValueError("normalized corpus contains an unexpected field")
+            spool.write(_canonical_json_bytes(dict(record)))
+            spool.write(b"\n")
+            count += 1
+        if count == 0:
+            raise ValueError("selected claim has no non-empty public evidence")
+        spool.seek(0)
+        return spool.read(), count
 
 
 def _atomic_write(path: Path, payload: bytes) -> None:

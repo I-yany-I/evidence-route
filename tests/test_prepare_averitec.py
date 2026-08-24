@@ -1,11 +1,13 @@
 import hashlib
 import json
+import tracemalloc
 from pathlib import Path
 
 import pytest
 
 from scripts.prepare_averitec import (
     _parse_jsonl_member,
+    _serialised_corpus,
     build_parser,
     normalize_member,
     prepare_dataset,
@@ -82,6 +84,31 @@ def test_member_normalization_skips_empty_metadata_placeholder() -> None:
 
     assert len(records) == 1
     assert records[0]["source_url"] == "https://example.org/a"
+
+
+def test_serialised_corpus_consumes_large_iterable_without_line_list() -> None:
+    text = "x" * 1_000_000
+
+    def records():
+        for index in range(20):
+            yield {
+                "evidence_id": f"av:dev:1:0:{index}",
+                "title": "Source",
+                "source_url": "https://example.org/source",
+                "text": text,
+                "snapshot_sha256": "a" * 64,
+            }
+
+    tracemalloc.start()
+    try:
+        payload, count = _serialised_corpus(records())
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert count == 20
+    assert payload.count(b"\n") == 20
+    assert peak < len(payload) * 1.75
 
 
 def test_jsonl_parser_preserves_unicode_line_separators_inside_text() -> None:
