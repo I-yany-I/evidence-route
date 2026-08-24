@@ -1,9 +1,10 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
-from evidence_route.cli import CliServices, create_app
+from evidence_route.cli import CliServices, ProductionServices, create_app
 
 
 class FakeServices(CliServices):
@@ -150,12 +151,34 @@ def test_evaluate_defaults_to_budget_preview_without_network(tmp_path: Path) -> 
             str(tmp_path / "stability.json"),
             "--activity-dir",
             str(tmp_path / "activity"),
+            "--calibration-report",
+            str(tmp_path / "calibration-report.json"),
         ],
     )
     assert result.exit_code == 0
     assert '"base_call_upper_bound": 1544' in result.output
     assert services.preview_calls == 1
     assert services.evaluate_calls == 0
+
+
+def test_production_preview_does_not_construct_transport() -> None:
+    constructed = False
+
+    def forbidden_transport(settings):
+        nonlocal constructed
+        constructed = True
+        raise AssertionError("budget preview must not construct a transport")
+
+    services = ProductionServices(transport_factory=forbidden_transport)
+    payload = services.preview_campaign(
+        config_path=Path("configs/default.yaml"),
+        pricing_path=Path("configs/pricing.dryrun.yaml"),
+    )
+    assert constructed is False
+    assert payload["base_call_upper_bound"] == 1544
+    assert payload["repair_upper_bound"] == 3088
+    assert payload["fault_upper_bound"] == 9264
+    assert payload["paid_execution_started"] is False
 
 
 def test_paid_evaluate_requires_exactly_one_lifecycle_flag(tmp_path: Path) -> None:
@@ -168,6 +191,8 @@ def test_paid_evaluate_requires_exactly_one_lifecycle_flag(tmp_path: Path) -> No
         str(tmp_path / "stability.json"),
         "--activity-dir",
         str(tmp_path / "activity"),
+        "--calibration-report",
+        str(tmp_path / "calibration-report.json"),
         "--accept-paid-campaign",
     ]
     result = CliRunner().invoke(create_app(services), args)
@@ -222,3 +247,101 @@ def test_report_does_not_require_llm_environment(tmp_path: Path, monkeypatch) ->
     )
     assert result.exit_code == 0
     assert services.report_calls == 1
+
+
+def test_report_forwards_explicit_publication_evidence_paths(tmp_path: Path) -> None:
+    class CapturingServices(FakeServices):
+        report_kwargs: dict[str, object] | None = None
+
+        def report(self, **kwargs):
+            self.report_kwargs = kwargs
+            return super().report(**kwargs)
+
+    services = CapturingServices()
+    paths = {
+        "repository-root": tmp_path / "repo",
+        "run-store": tmp_path / "ledger.sqlite3",
+        "runtime-manifest": tmp_path / "dev-runtime.json",
+        "calibration-runtime-manifest": tmp_path / "calibration-runtime.json",
+        "stability-runtime-manifest": tmp_path / "stability-runtime.json",
+        "calibration-report": tmp_path / "calibration-report.json",
+        "calibrated-config": tmp_path / "calibrated.yaml",
+        "corpus-preparation-receipt": tmp_path / "preparation-receipt.json",
+        "prompt-bundle": tmp_path / "prompts.py",
+        "pricing": tmp_path / "pricing.yaml",
+        "requirements-lock": tmp_path / "requirements.lock",
+        "nltk-data-root": tmp_path / "nltk",
+    }
+    args = [
+        "report",
+        "--activity-dir",
+        str(tmp_path / "activity"),
+        "--gold-manifest",
+        str(tmp_path / "gold.json"),
+        "--output-dir",
+        str(tmp_path / "report"),
+    ]
+    for option, path in paths.items():
+        args.extend((f"--{option}", str(path)))
+
+    result = CliRunner().invoke(create_app(services), args)
+
+    assert result.exit_code == 0
+    assert services.report_kwargs is not None
+    for option, path in paths.items():
+        assert services.report_kwargs[option.replace("-", "_")] == path
+
+
+def test_production_report_resolves_relative_paths_from_repository_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repository_root = tmp_path / "repo"
+    repository_root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    captured: dict[str, object] = {}
+
+    class Bundle:
+        publication_gate = SimpleNamespace(publishable=False)
+
+        def write(self, output_dir: Path, *, readme: Path | None = None) -> None:
+            captured["output_dir"] = output_dir
+            captured["readme"] = readme
+
+    def fake_build_report_bundle(report_input, *, publish=False):
+        captured["report_input"] = report_input
+        captured["publish"] = publish
+        return Bundle()
+
+    monkeypatch.setattr("evidence_route.cli.build_report_bundle", fake_build_report_bundle)
+    services = ProductionServices(transport=object())
+    services.report(
+        repository_root=repository_root,
+        activity_dir=Path("artifacts/evaluation/gate-a"),
+        gold_manifest=Path("data/scorer_manifests/dev.json"),
+        output_dir=Path("reports/incomplete/gate-a"),
+        run_store=Path("artifacts/gate-a.sqlite3"),
+        runtime_manifest=Path("data/manifests/dev.json"),
+        calibration_runtime_manifest=Path("data/manifests/calibration.json"),
+        stability_runtime_manifest=Path("data/manifests/stability.json"),
+        calibration_report=Path("reports/calibration/report.json"),
+        calibrated_config=Path("configs/calibrated.yaml"),
+        corpus_preparation_receipt=Path("data/processed/receipt.json"),
+        prompt_bundle=Path("src/evidence_route/prompts.py"),
+        pricing=Path("configs/pricing.local.yaml"),
+        requirements_lock=Path("requirements.lock"),
+        nltk_data_root=Path("data/external/nltk"),
+        publish=False,
+        readme=Path("README.md"),
+    )
+
+    report_input = captured["report_input"]
+    assert report_input.repository_root == repository_root.resolve()
+    assert report_input.activity_dir == (repository_root / "artifacts/evaluation/gate-a").resolve()
+    assert (
+        report_input.gold_manifest == (repository_root / "data/scorer_manifests/dev.json").resolve()
+    )
+    assert report_input.run_store == (repository_root / "artifacts/gate-a.sqlite3").resolve()
+    assert captured["output_dir"] == (repository_root / "reports/incomplete/gate-a").resolve()
+    assert captured["readme"] == (repository_root / "README.md").resolve()

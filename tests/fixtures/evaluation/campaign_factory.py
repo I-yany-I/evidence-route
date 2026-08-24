@@ -71,6 +71,9 @@ def _artifact(plan: CampaignPlan, item: CampaignWorkItem, model_id: str | None) 
         available_evidence_ids=[],
         initial_route="single",
         usage=usage,
+        estimated_cost_micro_cny=1,
+        cost_currency="CNY",
+        price_config_id=plan.freeze.pricing_sha256,
         latency_ms=1,
     )
     payload: dict[str, object] = {

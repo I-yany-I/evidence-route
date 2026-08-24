@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -62,9 +63,7 @@ _INITIALIZE_LOCK = RLock()
 def redact_payload(value: object) -> object:
     if isinstance(value, dict):
         return {
-            str(key): "[REDACTED]"
-            if str(key).lower() in _SENSITIVE_KEYS
-            else redact_payload(item)
+            str(key): "[REDACTED]" if str(key).lower() in _SENSITIVE_KEYS else redact_payload(item)
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -82,9 +81,7 @@ class TraceWriter:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def write(self, payload: object) -> None:
-        encoded = json.dumps(
-            redact_payload(payload), ensure_ascii=False, separators=(",", ":")
-        )
+        encoded = json.dumps(redact_payload(payload), ensure_ascii=False, separators=(",", ":"))
         with self.path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(encoded + "\n")
             handle.flush()
@@ -115,17 +112,113 @@ class SQLiteRunStore:
         if self.cap_micro_cny <= 0:
             raise ValueError("cap_cny must be positive")
         self.pricing = pricing
+        self.read_only = False
         self._initialize()
 
+    @classmethod
+    def open_existing(
+        cls,
+        path: Path,
+        *,
+        activity_id: str,
+        cap_cny: float,
+        pricing: PriceConfig,
+    ) -> SQLiteRunStore:
+        """Open an already-created ledger without creating or mutating anything."""
+
+        target = Path(path)
+        if not target.is_file():
+            raise ValueError(f"run store input is missing: {target}")
+        store = cls.__new__(cls)
+        store.path = target
+        store.activity_id = activity_id
+        store.cap_micro_cny = int(Decimal(str(cap_cny)) * Decimal(1_000_000))
+        if store.cap_micro_cny <= 0:
+            raise ValueError("cap_cny must be positive")
+        store.pricing = pricing
+        store.read_only = True
+        try:
+            store._validate_existing()
+        except (OSError, sqlite3.DatabaseError, ValueError) as exc:
+            if isinstance(exc, ValueError) and str(exc).startswith("run store"):
+                raise
+            raise ValueError("run store is not a valid existing ledger") from exc
+        return store
+
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(
-            self.path, timeout=5.0, isolation_level=None, check_same_thread=False
-        )
+        if self.read_only:
+            connection = sqlite3.connect(
+                f"file:{self.path.resolve()}?mode=ro",
+                uri=True,
+                timeout=5.0,
+                isolation_level=None,
+                check_same_thread=False,
+            )
+        else:
+            connection = sqlite3.connect(
+                self.path, timeout=5.0, isolation_level=None, check_same_thread=False
+            )
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=FULL")
+        if self.read_only:
+            connection.execute("PRAGMA query_only=ON")
+        else:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=FULL")
         connection.execute("PRAGMA busy_timeout=5000")
         return connection
+
+    def _validate_existing(self) -> None:
+        connection = self._connect()
+        try:
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            if not {"store_metadata", "calls"}.issubset(tables):
+                raise ValueError("run store is missing required tables")
+            metadata = connection.execute(
+                "SELECT * FROM store_metadata WHERE singleton = 1"
+            ).fetchone()
+            expected = (
+                self.activity_id,
+                self.cap_micro_cny,
+                self.pricing.currency,
+                self.pricing.config_id,
+            )
+            if metadata is None or (
+                metadata["schema_version"],
+                metadata["activity_id"],
+                metadata["cap_micro_cny"],
+                metadata["currency"],
+                metadata["price_config_id"],
+            ) != (1, *expected):
+                raise ValueError("run store metadata does not match requested activity")
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(calls)").fetchall()
+            }
+            required = {
+                "call_id",
+                "request_sha256",
+                "activity_id",
+                "run_id",
+                "node",
+                "task_id",
+                "logical_attempt",
+                "state",
+                "reserved_micro_cny",
+                "actual_micro_cny",
+                "usage_json",
+                "usage_source",
+                "requested_alias",
+                "response_model_id_raw",
+                "identity_verified",
+            }
+            if not required.issubset(columns):
+                raise ValueError("run store calls table is incomplete")
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         with _INITIALIZE_LOCK:
@@ -182,9 +275,7 @@ class SQLiteRunStore:
                 self.pricing.config_id,
             )
             if row is None:
-                connection.execute(
-                    "INSERT INTO store_metadata VALUES (1, 1, ?, ?, ?, ?)", expected
-                )
+                connection.execute("INSERT INTO store_metadata VALUES (1, 1, ?, ?, ?, ?)", expected)
             elif (
                 row["activity_id"],
                 row["cap_micro_cny"],
@@ -322,9 +413,7 @@ class SQLiteRunStore:
             if row is None:
                 raise KeyError(call_id)
             if row["state"] != expected.value:
-                raise BillingStateError(
-                    f"cannot transition {row['state']} call to {target.value}"
-                )
+                raise BillingStateError(f"cannot transition {row['state']} call to {target.value}")
             now = _timestamp()
             if increment_transport:
                 connection.execute(
@@ -435,17 +524,24 @@ class SQLiteRunStore:
             if row is None:
                 return None
             return {
+                "call_id": row["call_id"],
+                "request_sha256": row["request_sha256"],
+                "activity_id": row["activity_id"],
+                "run_id": row["run_id"],
+                "node": row["node"],
+                "task_id": row["task_id"],
+                "logical_attempt": row["logical_attempt"],
                 "state": row["state"],
                 "payload": json.loads(row["payload_json"]) if row["payload_json"] else None,
                 "usage": (
-                    Usage.model_validate_json(row["usage_json"])
-                    if row["usage_json"]
-                    else None
+                    Usage.model_validate_json(row["usage_json"]) if row["usage_json"] else None
                 ),
                 "actual_cost_micro_cny": row["actual_micro_cny"],
                 "requested_alias": row["requested_alias"],
                 "response_model_id_raw": row["response_model_id_raw"],
-                "identity_verified": bool(row["identity_verified"]),
+                "identity_verified": (
+                    None if row["identity_verified"] is None else bool(row["identity_verified"])
+                ),
                 "usage_source": row["usage_source"],
                 "transport_attempts": row["transport_attempts"],
                 "cache_hits": row["cache_hits"],
@@ -561,6 +657,20 @@ class SQLiteRunStore:
             billing_uncertain=billing_uncertain,
         )
 
+    def unresolved_call_states(self, run_id: str) -> dict[str, CallState]:
+        """Return non-terminal call rows for a run, preserving their typed billing state."""
+
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT call_id, state FROM calls WHERE activity_id = ? AND run_id = ? "
+                "AND state != 'completed' ORDER BY created_at, call_id",
+                (self.activity_id, run_id),
+            ).fetchall()
+        finally:
+            connection.close()
+        return {row["call_id"]: CallState(row["state"]) for row in rows}
+
     def summarize_activity(self) -> RunCallSummary:
         """Aggregate every persisted call for this activity.
 
@@ -580,6 +690,11 @@ class SQLiteRunStore:
             ]
         finally:
             connection.close()
+        return self.summarize_runs(run_ids)
+
+    def summarize_runs(self, run_ids: Sequence[str]) -> RunCallSummary:
+        """Aggregate only the supplied runs, preserving run and call order."""
+
         summaries = [self.summarize_run(run_id) for run_id in run_ids]
         if not summaries:
             return RunCallSummary(

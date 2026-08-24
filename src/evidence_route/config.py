@@ -60,7 +60,7 @@ class GenerationSettings(ConfigModel):
 
 
 class BudgetSettings(ConfigModel):
-    estimated_cost_cap_cny: float = Field(default=350.0, gt=0)
+    estimated_cost_cap_cny: float = Field(default=500.0, gt=0)
     reserve_ratio: float = Field(default=0.2, ge=0, le=1)
 
 

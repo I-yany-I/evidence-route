@@ -9,8 +9,8 @@
 - 规则优先、LLM 兜底的 adaptive router，以及 fixed single/fixed multi 对照策略。
 - LangGraph 有界执行图：最多 3 个并行 worker，single 路径最多升级一次。
 - SQLite 幂等调用缓存、整数 micro-CNY 预算预留、usage/账单不确定性安全停止。
-- 32 条 train-only calibration 保存结果重放，54 个候选策略零额外模型调用筛选。
-- 80 条 dev 三策略交错评测、20 条三次重复稳定性评测及可恢复 campaign。
+- 支持 32 条 train-only calibration 的保存结果重放，54 个候选策略无需额外模型调用筛选。
+- 支持 80 条 dev 三策略交错评测、20 条三次重复稳定性评测及可恢复 campaign。
 - 全 manifest 指标、completed-only 官方 evaluator、bootstrap/Wilson 区间和确定性报告。
 
 ## Architecture
@@ -37,7 +37,7 @@ flowchart LR
 
 ## Quick Start
 
-要求 Python 3.11。
+要求 Python 3.11（仓库锁定环境按 3.11 验证）。
 
 ```powershell
 python -m pip install -r requirements.lock
@@ -49,10 +49,36 @@ $env:EVIDENCE_ROUTE_PRICE_FILE = "configs/pricing.local.yaml"
 evidence-route --help
 ```
 
+`configs/pricing.example.yaml` 只是字段 schema（费率为空、`strict_evaluation=false`），不能用于真实执行。
+真实 provider 运行前需在被忽略的 `configs/pricing.local.yaml` 中填写 CNY 输入/输出费率和带日期的
+`price_source`，并保持 `strict_evaluation: true`；无 provider 时请使用上文明确标注的
+`configs/pricing.dryrun.yaml`，它只允许预算预览。
+
 提供方是 OpenAI-compatible provider。报告中的模型 ID 是中转服务自报值，
 `identity unverified`，不表示由任何模型厂商认证。
 
+### Offline budget preview
+
+无需密钥或网络即可检查 Gate A 的调用上界和启动预算：
+
+```powershell
+evidence-route evaluate `
+  --manifest tests/fixtures/evaluation/runtime.json `
+  --stability-manifest tests/fixtures/evaluation/runtime.json `
+  --config configs/default.yaml `
+  --pricing configs/pricing.dryrun.yaml `
+  --activity-dir artifacts/offline-preview
+```
+
+`configs/pricing.dryrun.yaml` 使用明确标注的非计费占位价格，只用于离线预算计算；它不能用于真实 provider 账单。
+命令只复现预算与调用上界；路由行为由 `tests/test_routing.py` 和 `tests/test_graph.py` 的离线 fixture 测试验证。输出中的 `1544/3088/9264` 分别是 Gate A 的 base/repair/fault transport-attempt 上界，
+`startup_required_micro_cny=12168000` 是占位价格下的 CNY 12.168 启动预留，
+`cap_micro_cny=500000000` 对应 CNY 500 客户端上限。这里的两个 fixture manifest 只用于满足
+CLI 输入契约；上界由冻结的 32 calibration、80 dev、20 stability profile 计算，不代表 fixture 行数。
+
 ## Prepare The Frozen Benchmark Subset
+
+这是网络步骤，会下载并校验公开 AVeriTeC 快照；它不是离线 demo。只想复现路由和预算上界时，使用上面的 `tests/fixtures/evaluation` manifest 与 `configs/pricing.dryrun.yaml`，无需下载语料。
 
 ```powershell
 python scripts/prepare_averitec.py `
@@ -73,19 +99,21 @@ python scripts/prepare_averitec.py `
 ```powershell
 evidence-route verify `
   --claim-id dev-0 `
-  --claim "A claim to verify" `
+  --claim "<exact claim text from the claim-only manifest>" `
   --strategy adaptive `
   --config configs/default.yaml `
   --pricing configs/pricing.local.yaml `
   --corpus-dir data/processed/averitec/corpora
 ```
 
+这是 ad-hoc 单条真实 provider 调用示例，不是离线 demo，也不计入 Gate A benchmark；它需要有效凭据和真实价格文件，可能产生费用。`--claim` 必须与 `--claim-id` 对应的 runtime manifest 原文一致，当前 CLI 不会替你从 manifest 自动填充或校验文本。
+
 每个结果包含状态、四分类 verdict、引用、usage、成本身份和错误码。账单不确定、usage 缺失
 或模型 ID 漂移会停止 campaign，不会被改写成预测标签。
 
 ## Run Calibration And Evaluation
 
-不带付费确认时，命令只输出 base/repair/fault 上界和启动预算，不构造网络 transport。
+`evaluate` 预览和 `calibrate --collect` 在没有付费确认时只输出启动预算/调用上界，不构造网络 transport；`calibrate --replay` 则只重放已保存 artifact，同样不新增模型调用。
 
 ```powershell
 evidence-route calibrate --help
@@ -93,8 +121,17 @@ evidence-route evaluate --help
 evidence-route report --help
 ```
 
-冻结评测名称固定为 `AVeriTeC dev balanced subset (n=80)`。运行顺序为 train calibration
-收集、保存结果 replay、冻结策略、三策略交错 dev、adaptive stability、报告发布。
+离线回归与依赖检查：
+
+```powershell
+conda run -n agent-collab python -m pytest -m "not network and not live and not paid" -q
+conda run -n agent-collab python -m ruff check src tests scripts
+conda run -n agent-collab python -m pip check
+```
+
+冻结评测名称固定为 `AVeriTeC dev balanced subset (n=80)`。授权后的 Gate A protocol 顺序为 train
+calibration 收集、保存结果 replay、冻结策略、三策略交错 dev、adaptive stability、报告发布；离线
+复现只执行预算预览、单元测试和帮助命令，不会构造付费 transport。
 
 ## Results
 
@@ -105,10 +142,12 @@ Final frozen run not generated yet. Do not quote design targets as measured resu
 这里的结果不是官方 leaderboard 成绩。只有完整 campaign 通过发布门禁后，报告命令才会从
 `summary.json` 同步更新此区块和简历片段。
 
+简历项目表述、90 秒讲法和常见追问见 [docs/RESUME_PROJECT.md](docs/RESUME_PROJECT.md)。其中明确区分了可复现工程上界与尚未生成的真实模型结果。
+
 ## Artifact And Metric Definitions
 
 - Headline quality：80 条完整 manifest 的 macro-F1；partial、failed 和 missing 均按无预测惩罚。
-- Completed-only：只对合法 completed 输出运行固定的 2024 shared-task evaluator，并同时报告分母。
+- Completed-only：只对合法 completed 输出运行固定的 2024 shared-task evaluator 与 2023 secondary evaluator，并同时报告分母。
 - Cost：由 provider usage 与冻结 CNY 价格配置计算，所有预算比较使用整数 micro-CNY。
 - Latency：P50/P95 只使用 fresh end-to-end latency；checkpoint downtime 与 cache hit 单列。
 - Stability：20 条 claim 的 adaptive repeat 0/1/2 verdict 一致率和 Wilson 区间。
@@ -119,6 +158,7 @@ Final frozen run not generated yet. Do not quote design targets as measured resu
 - 每个 run/campaign/artifact 使用确定性 ID 与 canonical JSON SHA-256。
 - 付费调用共用一个 SQLite ledger；恢复不会重复计算已完成调用的 usage 或成本。
 - 默认测试禁止网络；`network`、`live`、`paid` 必须显式标记。
+- 上述离线命令只使用仓库 fixture；空的 `EVIDENCE_ROUTE_API_KEY`、`EVIDENCE_ROUTE_BASE_URL`、`EVIDENCE_ROUTE_MODEL` 不影响测试和预算预览。
 
 ## Limitations
 

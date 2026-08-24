@@ -15,8 +15,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from evidence_route.artifacts import BillingStateError, SQLiteRunStore, atomic_write_json
-from evidence_route.budget import BudgetExceeded, PriceConfig
+from evidence_route.artifacts import (
+    BillingStateError,
+    CallState,
+    SQLiteRunStore,
+    atomic_write_json,
+)
+from evidence_route.budget import BudgetExceeded, PriceConfig, UsageUnavailable
 from evidence_route.config import GenerationSettings
 from evidence_route.contracts import ResultStatus, Strategy, Usage, VerificationResult
 from evidence_route.evaluation.activity import (
@@ -34,10 +39,12 @@ from evidence_route.evaluation.activity import (
     compare_freeze_identity,
     derive_campaign_status,
     derive_run_id,
+    highest_stop_reason,
     result_status_to_work_status,
     verify_artifact_fingerprint,
     verify_campaign_fingerprint,
 )
+from evidence_route.llm import BillingUncertain
 
 Executor = Callable[[CampaignWorkItem], Awaitable[RunArtifact | Mapping[str, Any]]]
 
@@ -147,9 +154,7 @@ def build_dev_schedule(
     strategies = list(Strategy)
     base = sorted(
         strategies,
-        key=lambda strategy: hashlib.sha256(
-            f"{seed}\0{strategy.value}".encode()
-        ).digest(),
+        key=lambda strategy: hashlib.sha256(f"{seed}\0{strategy.value}".encode()).digest(),
     )
     schedule: list[CampaignWorkItem] = []
     for claim_index, claim in enumerate(claims):
@@ -243,7 +248,13 @@ class CampaignRunner:
         verify_campaign_fingerprint(plan)
         atomic_write_json(self.plan_path, plan.model_dump(mode="json"))
 
-    def _new_state(self, plan: CampaignPlan) -> CampaignState:
+    def _new_state(
+        self,
+        plan: CampaignPlan,
+        *,
+        initial_model_ids: Iterable[str] = (),
+    ) -> CampaignState:
+        model_ids = sorted({value.strip() for value in initial_model_ids if value.strip()})
         return CampaignState(
             schema_version="1",
             activity_id=plan.activity_id,
@@ -258,7 +269,7 @@ class CampaignRunner:
                 for item in plan.schedule
             ],
             stability_repeat_zero_artifact_sha256s={},
-            observed_response_model_ids_raw=[],
+            observed_response_model_ids_raw=model_ids,
             billing_uncertain=False,
             summary=None,
         )
@@ -334,6 +345,18 @@ class CampaignRunner:
         if self.run_store is None:
             return
         summary = self.run_store.summarize_run(artifact.run_id)
+        unresolved = self.run_store.unresolved_call_states(artifact.run_id)
+        if unresolved and not artifact.diagnostic_only:
+            if any(
+                state in {CallState.SENT, CallState.BILLING_UNCERTAIN}
+                for state in unresolved.values()
+            ):
+                raise BillingStateError(f"run {artifact.run_id} has unresolved transmitted calls")
+            raise FreezeMismatch(
+                "run_store.unresolved_call_state",
+                expected="all calls completed",
+                actual={call_id: state.value for call_id, state in unresolved.items()},
+            )
         if not summary.call_ids:
             if artifact.call_ids:
                 self._require_accounting_match("call_ids", [], artifact.call_ids)
@@ -453,8 +476,17 @@ class CampaignRunner:
             raise FileNotFoundError(self.state_path)
         return CampaignState.model_validate_json(self.state_path.read_text(encoding="utf-8"))
 
-    async def run(self, plan: CampaignPlan) -> CampaignState:
-        if self.plan_path.exists() or self.state_path.exists():
+    async def run(
+        self,
+        plan: CampaignPlan,
+        *,
+        initial_model_ids: Iterable[str] = (),
+    ) -> CampaignState:
+        plan_exists = self.plan_path.exists()
+        state_exists = self.state_path.exists()
+        if plan_exists != state_exists:
+            raise FileExistsError("campaign directory contains an incomplete campaign journal")
+        if plan_exists:
             raise FileExistsError("campaign directory already contains a persisted plan")
         if plan.call_bounds.startup_required_micro_cny > plan.cap_micro_cny:
             raise BudgetExceeded("startup worst-case reservation exceeds campaign cap")
@@ -462,7 +494,7 @@ class CampaignRunner:
         self.root.mkdir(parents=True, exist_ok=True)
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         self._write_plan(plan)
-        state = self._new_state(plan)
+        state = self._new_state(plan, initial_model_ids=initial_model_ids)
         self._write_state(state)
         return await self._execute(plan, state)
 
@@ -478,6 +510,25 @@ class CampaignRunner:
             raise ValueError("campaign state does not match persisted plan")
         self._verify_state_items(plan, state)
         self._verify_persisted_artifacts(plan, state)
+        persisted_reason = highest_stop_reason(
+            [state.stop_reason, *(item.stop_reason for item in state.items)]
+        )
+        if (
+            persisted_reason is not None
+            and persisted_reason is not CampaignStopReason.PROCESS_INTERRUPTION
+        ):
+            normalized_status = derive_campaign_status(state.items, stop_reason=persisted_reason)
+            normalized_billing = persisted_reason is CampaignStopReason.BILLING_UNCERTAIN
+            if (
+                state.stop_reason is not persisted_reason
+                or state.status is not normalized_status
+                or state.billing_uncertain != normalized_billing
+            ):
+                state.stop_reason = persisted_reason
+                state.status = normalized_status
+                state.billing_uncertain = normalized_billing
+                self._write_state(state)
+            return state
         running_items = [item for item in state.items if item.status is WorkStatus.RUNNING]
         if len(running_items) > 1:
             raise ValueError("campaign state is corrupt: multiple running items")
@@ -493,10 +544,67 @@ class CampaignRunner:
             running_item.stop_reason = CampaignStopReason.PROCESS_INTERRUPTION
             running_item.interrupted_at = running_item.interrupted_at or _now()
             changed = True
+        elif state.stop_reason is CampaignStopReason.PROCESS_INTERRUPTION:
+            resumable = [
+                item
+                for item in state.items
+                if item.status is WorkStatus.INTERRUPTED
+                and item.stop_reason is CampaignStopReason.PROCESS_INTERRUPTION
+            ]
+            if not resumable:
+                raise ValueError("campaign state has process interruption without a resumable item")
+            if len(resumable) > 1:
+                timestamps: list[datetime] = []
+                for item in resumable:
+                    if item.interrupted_at is None:
+                        raise ValueError("campaign state has multiple resumable interruptions")
+                    try:
+                        timestamp = datetime.fromisoformat(item.interrupted_at)
+                    except ValueError as exc:
+                        raise ValueError(
+                            "campaign state has an invalid interruption timestamp"
+                        ) from exc
+                    if timestamp.tzinfo is None:
+                        timestamp = timestamp.replace(tzinfo=UTC)
+                    timestamps.append(timestamp)
+                latest = max(timestamps)
+                latest_items = [
+                    item
+                    for item, timestamp in zip(resumable, timestamps, strict=True)
+                    if timestamp == latest
+                ]
+                if len(latest_items) != 1:
+                    raise ValueError("campaign state has multiple resumable interruptions")
+                running_item = latest_items[0]
+            else:
+                running_item = resumable[0]
         if changed:
             state.stop_reason = CampaignStopReason.PROCESS_INTERRUPTION
             state.status = CampaignStatus.INTERRUPTED
             self._write_state(state)
+        if running_item is not None and self.run_store is not None:
+            unresolved = self.run_store.unresolved_call_states(running_item.run_id)
+            unresolved_states = set(unresolved.values())
+            reason: CampaignStopReason | None = None
+            if unresolved_states & {CallState.SENT, CallState.BILLING_UNCERTAIN}:
+                reason = CampaignStopReason.BILLING_UNCERTAIN
+            elif CallState.USAGE_MISSING in unresolved_states:
+                reason = CampaignStopReason.USAGE_MISSING
+            if reason is not None:
+                artifact = self._diagnostic_artifact(
+                    plan,
+                    plan.schedule[state.items.index(running_item)],
+                    reason,
+                    "interrupted run has unresolved persisted call accounting",
+                )
+                return self._stop_with_artifact(
+                    plan,
+                    state,
+                    state.items.index(running_item),
+                    artifact,
+                    reason,
+                )
+        if running_item is not None:
             running_item.status = WorkStatus.PENDING
             running_item.stop_reason = None
             running_item.resumed_at = _now()
@@ -575,6 +683,13 @@ class CampaignRunner:
             initial_route="single",
             failure_stage="single",
             usage=usage,
+            estimated_cost_micro_cny=actual_cost,
+            cost_currency="CNY" if actual_cost is not None else None,
+            price_config_id=(
+                self.run_store.pricing.config_id
+                if actual_cost is not None and self.run_store is not None
+                else None
+            ),
             errors=[reason.value.upper(), detail],
         )
         payload: dict[str, object] = {
@@ -625,9 +740,7 @@ class CampaignRunner:
         self._write_state(state)
         return state
 
-    def _verify_stability_baselines(
-        self, plan: CampaignPlan, state: CampaignState
-    ) -> None:
+    def _verify_stability_baselines(self, plan: CampaignPlan, state: CampaignState) -> None:
         item_by_run_id = {item.run_id: item for item in state.items}
         for link in plan.stability_repeat_zero_links:
             dev_item = item_by_run_id[link.dev_adaptive_run_id]
@@ -640,9 +753,7 @@ class CampaignRunner:
                     actual=actual,
                 )
             artifact_path = self.root / dev_item.artifact_relpath
-            artifact = RunArtifact.model_validate_json(
-                artifact_path.read_text(encoding="utf-8")
-            )
+            artifact = RunArtifact.model_validate_json(artifact_path.read_text(encoding="utf-8"))
             verify_artifact_fingerprint(artifact)
             if artifact.artifact_sha256 != actual:
                 raise FreezeMismatch(
@@ -695,7 +806,21 @@ class CampaignRunner:
             self._write_state(state)
             try:
                 artifact = await self._invoke(work)
-            except BudgetExceeded:
+            except BudgetExceeded as exc:
+                # A provider response may already have been committed to the run store before
+                # the store surfaces an over-budget signal.  Preserve that accounting on the
+                # current item; only work items that were never started are budget-skipped.
+                if (
+                    self.run_store is not None
+                    and self.run_store.summarize_run(work.run_id).call_ids
+                ):
+                    artifact = self._diagnostic_artifact(
+                        plan, work, CampaignStopReason.BUDGET, str(exc)
+                    )
+                    self._stop_with_artifact(
+                        plan, state, index, artifact, CampaignStopReason.BUDGET
+                    )
+                    return self._mark_budget(state, index + 1)
                 return self._mark_budget(state, index)
             except BillingStateError as exc:
                 # An unresolved sent/billing-uncertain row cannot be safely retried.  Leave the
@@ -705,6 +830,20 @@ class CampaignRunner:
                 )
                 return self._stop_with_artifact(
                     plan, state, index, artifact, CampaignStopReason.BILLING_UNCERTAIN
+                )
+            except BillingUncertain as exc:
+                artifact = self._diagnostic_artifact(
+                    plan, work, CampaignStopReason.BILLING_UNCERTAIN, str(exc)
+                )
+                return self._stop_with_artifact(
+                    plan, state, index, artifact, CampaignStopReason.BILLING_UNCERTAIN
+                )
+            except UsageUnavailable as exc:
+                artifact = self._diagnostic_artifact(
+                    plan, work, CampaignStopReason.USAGE_MISSING, str(exc)
+                )
+                return self._stop_with_artifact(
+                    plan, state, index, artifact, CampaignStopReason.USAGE_MISSING
                 )
             except (KeyboardInterrupt, CampaignProcessInterruption):
                 item.status = WorkStatus.INTERRUPTED
@@ -727,15 +866,6 @@ class CampaignRunner:
             # converted into a diagnostic result.  A mismatch leaves the journal RUNNING so a
             # subsequent resume performs the same immutable audit before any retry.
             self._verify_artifact_identity(plan, work, artifact)
-            ids = _model_ids(artifact)
-            if not baseline and ids:
-                baseline = set(ids)
-                state.observed_response_model_ids_raw = sorted(ids)
-            elif len(ids) > 1 or (ids and ids != baseline):
-                self._stop_with_artifact(
-                    plan, state, index, artifact, CampaignStopReason.MODEL_DRIFT
-                )
-                return state
             if artifact.billing_uncertain:
                 self._stop_with_artifact(
                     plan, state, index, artifact, CampaignStopReason.BILLING_UNCERTAIN
@@ -744,6 +874,19 @@ class CampaignRunner:
             if artifact.usage_source == "missing" or not artifact.usage.complete:
                 self._stop_with_artifact(
                     plan, state, index, artifact, CampaignStopReason.USAGE_MISSING
+                )
+                return state
+            ids = _model_ids(artifact)
+            if not baseline and ids:
+                baseline = set(ids)
+                state.observed_response_model_ids_raw = sorted(ids)
+            elif len(ids) > 1 or (ids and ids != baseline):
+                diagnostic_payload = artifact.model_dump(mode="json")
+                diagnostic_payload["diagnostic_only"] = True
+                diagnostic_payload["artifact_sha256"] = artifact_fingerprint(diagnostic_payload)
+                diagnostic = RunArtifact.model_validate(diagnostic_payload)
+                self._stop_with_artifact(
+                    plan, state, index, diagnostic, CampaignStopReason.MODEL_DRIFT
                 )
                 return state
             digest = self._persist_artifact(plan, artifact, work)

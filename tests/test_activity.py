@@ -4,6 +4,7 @@ from evidence_route.evaluation.activity import (
     CampaignStatus,
     CampaignStopReason,
     FreezeMismatch,
+    derive_activity_status,
     derive_campaign_status,
 )
 
@@ -28,3 +29,52 @@ def test_first_changed_freeze_field_is_reported() -> None:
     error = FreezeMismatch("config_sha256", expected="a", actual="b")
     assert error.field == "config_sha256"
     assert "config_sha256" in str(error)
+
+
+def test_billing_uncertainty_precedes_process_interruption() -> None:
+    assert (
+        derive_activity_status(
+            CampaignStatus.COMPLETE,
+            CampaignStatus.INTERRUPTED,
+            CampaignStatus.PLANNED,
+            stop_reason=CampaignStopReason.PROCESS_INTERRUPTION,
+            billing_uncertain=True,
+        )
+        is CampaignStatus.INCOMPLETE_COST_UNCERTAIN
+    )
+
+
+@pytest.mark.parametrize(
+    ("phase_status", "expected"),
+    [
+        (CampaignStatus.INCOMPLETE_USAGE, CampaignStatus.INCOMPLETE_USAGE),
+        (CampaignStatus.INCOMPLETE_MODEL_DRIFT, CampaignStatus.INCOMPLETE_MODEL_DRIFT),
+        (CampaignStatus.INCOMPLETE_BUDGET, CampaignStatus.INCOMPLETE_BUDGET),
+        (CampaignStatus.FAILED, CampaignStatus.FAILED),
+        (CampaignStatus.CANCELLED, CampaignStatus.CANCELLED),
+    ],
+)
+def test_activity_phase_safety_status_precedes_process_interruption(
+    phase_status: CampaignStatus,
+    expected: CampaignStatus,
+) -> None:
+    assert (
+        derive_activity_status(
+            CampaignStatus.COMPLETE,
+            phase_status,
+            CampaignStatus.INTERRUPTED,
+            stop_reason=CampaignStopReason.PROCESS_INTERRUPTION,
+        )
+        is expected
+    )
+
+
+def test_activity_internal_error_precedes_cancel_and_interruption() -> None:
+    assert (
+        derive_activity_status(
+            CampaignStatus.COMPLETE,
+            CampaignStatus.CANCELLED,
+            CampaignStatus.FAILED,
+        )
+        is CampaignStatus.FAILED
+    )

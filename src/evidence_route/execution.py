@@ -43,6 +43,8 @@ def load_price_config(path: Path) -> PriceConfig:
         raise ValueError(f"strict CNY price configuration is invalid: {exc}") from exc
     if pricing.currency != "CNY":
         raise ValueError("strict price configuration currency must be CNY")
+    if pricing.provider == "offline-dry-run":
+        raise ValueError("offline-dry-run pricing is only valid for budget preview")
     if not pricing.strict_evaluation:
         raise ValueError("strict evaluation price configuration is required")
     if (

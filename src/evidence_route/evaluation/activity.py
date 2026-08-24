@@ -224,12 +224,16 @@ class CampaignItemState(StrictModel):
             CampaignStopReason.USER_CANCELLED,
         }:
             raise ValueError("cancelled item may only carry user_cancelled")
-        if self.status not in {
-            WorkStatus.STOPPED,
-            WorkStatus.INTERRUPTED,
-            WorkStatus.NOT_RUN_BUDGET,
-            WorkStatus.CANCELLED,
-        } and self.stop_reason is not None:
+        if (
+            self.status
+            not in {
+                WorkStatus.STOPPED,
+                WorkStatus.INTERRUPTED,
+                WorkStatus.NOT_RUN_BUDGET,
+                WorkStatus.CANCELLED,
+            }
+            and self.stop_reason is not None
+        ):
             raise ValueError("stop reason is only valid for a stopped/unfinished item")
         return self
 
@@ -265,15 +269,20 @@ class CampaignPlan(StrictModel):
         ]
         if run_ids != expected_ids:
             raise ValueError("campaign schedule contains a non-deterministic run ID")
+        phases = [item.phase for item in self.schedule]
+        first_stability = next(
+            (index for index, phase in enumerate(phases) if phase == "stability"),
+            len(phases),
+        )
+        if any(phase == "dev" for phase in phases[first_stability:]):
+            raise ValueError("campaign schedule must keep a dev/stability phase boundary")
         link_claims = [link.claim_id for link in self.stability_repeat_zero_links]
         if len(link_claims) != len(set(link_claims)):
             raise ValueError("stability baseline links must have unique claim IDs")
         adaptive_dev_ids = {
             item.claim_id: item.run_id
             for item in self.schedule
-            if item.phase == "dev"
-            and item.strategy is Strategy.ADAPTIVE
-            and item.repeat == 0
+            if item.phase == "dev" and item.strategy is Strategy.ADAPTIVE and item.repeat == 0
         }
         for link in self.stability_repeat_zero_links:
             if adaptive_dev_ids.get(link.claim_id) != link.dev_adaptive_run_id:
@@ -290,6 +299,15 @@ class CampaignPlan(StrictModel):
             raise ValueError(
                 "each stability baseline must have exactly scheduled repeats one and two"
             )
+        scheduled_stability_claims: list[str] = []
+        for item in self.schedule[first_stability:]:
+            if not scheduled_stability_claims or scheduled_stability_claims[-1] != item.claim_id:
+                scheduled_stability_claims.append(item.claim_id)
+        if scheduled_stability_claims != link_claims:
+            raise ValueError("stability baseline links must match scheduled manifest order")
+        for item in self.schedule[first_stability:]:
+            if item.strategy is not Strategy.ADAPTIVE or item.repeat not in {1, 2}:
+                raise ValueError("stability schedule must contain adaptive repeats one and two")
         return self
 
 
@@ -324,6 +342,15 @@ class RunArtifact(StrictModel):
     def validate_accounting(self) -> RunArtifact:
         if self.result.claim_id != self.claim_id:
             raise ValueError("run artifact claim ID differs from result claim ID")
+        if self.result.usage != self.usage:
+            raise ValueError("run artifact result usage differs from artifact usage")
+        if self.actual_cost_micro_cny is not None and (
+            self.result.estimated_cost_micro_cny != self.actual_cost_micro_cny
+            or self.result.cost_currency != "CNY"
+            or not self.result.price_config_id
+            or not self.result.price_config_id.strip()
+        ):
+            raise ValueError("run artifact result cost differs from exact artifact cost")
         if len(self.call_ids) != len(set(self.call_ids)):
             raise ValueError("run artifact call IDs must be unique")
         if self.fresh_call_count != len(self.call_ids):
@@ -465,8 +492,10 @@ class CampaignState(StrictModel):
                 raise ValueError("stability baseline claim IDs must be non-empty")
             if not _is_sha256(digest):
                 raise ValueError("stability baseline artifact hashes must be lowercase SHA-256")
-        if self.billing_uncertain and self.status is not CampaignStatus.INCOMPLETE_COST_UNCERTAIN:
-            raise ValueError("billing-uncertain state must stop as incomplete_cost_uncertain")
+        if self.billing_uncertain != (self.stop_reason is CampaignStopReason.BILLING_UNCERTAIN):
+            raise ValueError(
+                "billing_uncertain must match a billing_uncertain campaign stop reason"
+            )
         if self.stop_reason is not None:
             expected = _status_for_stop_reason(self.stop_reason)
             if self.status is not expected:
@@ -509,8 +538,10 @@ class ActivityRecord(StrictModel):
             raise ValueError("complete calibration status requires all artifact links")
         if (self.campaign_plan_sha256 is None) != (self.campaign_state_sha256 is None):
             raise ValueError("campaign plan and state hashes must be present together")
-        if self.billing_uncertain and self.status is not CampaignStatus.INCOMPLETE_COST_UNCERTAIN:
-            raise ValueError("billing-uncertain activity must stop as incomplete_cost_uncertain")
+        if self.billing_uncertain != (self.stop_reason is CampaignStopReason.BILLING_UNCERTAIN):
+            raise ValueError(
+                "billing_uncertain must match a billing_uncertain activity stop reason"
+            )
         if self.stop_reason is not None:
             expected = _status_for_stop_reason(self.stop_reason)
             if self.status is not expected:
@@ -554,9 +585,22 @@ _STOP_STATUS: dict[CampaignStopReason, CampaignStatus] = {
     CampaignStopReason.PROCESS_INTERRUPTION: CampaignStatus.INTERRUPTED,
 }
 
+_STATUS_STOP: dict[CampaignStatus, CampaignStopReason] = {
+    status: reason for reason, status in _STOP_STATUS.items()
+}
+
 
 def _status_for_stop_reason(reason: CampaignStopReason) -> CampaignStatus:
     return _STOP_STATUS[reason]
+
+
+def highest_stop_reason(
+    reasons: Iterable[CampaignStopReason | str | None],
+) -> CampaignStopReason | None:
+    """Return the most safety-critical reason using the frozen protocol order."""
+
+    present = {_coerce_stop_reason(reason) for reason in reasons if reason is not None}
+    return next((reason for reason in _STOP_PRECEDENCE if reason in present), None)
 
 
 def result_status_to_work_status(status: ResultStatus | str) -> WorkStatus:
@@ -614,9 +658,8 @@ def derive_campaign_status(
     if stop_reasons is not None:
         reasons.extend(_coerce_stop_reason(reason) for reason in stop_reasons)
     reasons.extend(reason for item in items if (reason := _reason_from_item(item)) is not None)
-    for reason in _STOP_PRECEDENCE:
-        if reason in reasons:
-            return _status_for_stop_reason(reason)
+    if reason := highest_stop_reason(reasons):
+        return _status_for_stop_reason(reason)
 
     statuses = [_coerce_work_status(item) for item in items]
     if not statuses:
@@ -649,36 +692,16 @@ def derive_activity_status(
 ) -> CampaignStatus:
     """Derive the publication-level status from the three phase statuses."""
 
-    if stop_reason is not None:
-        return _status_for_stop_reason(_coerce_stop_reason(stop_reason))
-    if billing_uncertain:
-        return CampaignStatus.INCOMPLETE_COST_UNCERTAIN
     statuses = [
-        value
-        if isinstance(value, CampaignStatus)
-        else CampaignStatus(value)
+        value if isinstance(value, CampaignStatus) else CampaignStatus(value)
         for value in (calibration_status, dev_status, stability_status)
     ]
-    safety = {
-        CampaignStatus.INCOMPLETE_COST_UNCERTAIN,
-        CampaignStatus.INCOMPLETE_USAGE,
-        CampaignStatus.INCOMPLETE_MODEL_DRIFT,
-        CampaignStatus.INCOMPLETE_BUDGET,
-        CampaignStatus.CANCELLED,
-        CampaignStatus.FAILED,
-        CampaignStatus.INTERRUPTED,
-    }
-    for status in (
-        CampaignStatus.INCOMPLETE_COST_UNCERTAIN,
-        CampaignStatus.INCOMPLETE_USAGE,
-        CampaignStatus.INCOMPLETE_MODEL_DRIFT,
-        CampaignStatus.INCOMPLETE_BUDGET,
-        CampaignStatus.INTERRUPTED,
-        CampaignStatus.CANCELLED,
-        CampaignStatus.FAILED,
-    ):
-        if status in statuses:
-            return status
+    reasons: list[CampaignStopReason | str | None] = [stop_reason]
+    reasons.extend(_STATUS_STOP.get(status) for status in statuses)
+    if billing_uncertain:
+        reasons.append(CampaignStopReason.BILLING_UNCERTAIN)
+    if reason := highest_stop_reason(reasons):
+        return _status_for_stop_reason(reason)
     if all(status is CampaignStatus.COMPLETE for status in statuses):
         return CampaignStatus.COMPLETE
     if CampaignStatus.RUNNING in statuses:
@@ -686,8 +709,6 @@ def derive_activity_status(
     if all(status is CampaignStatus.PLANNED for status in statuses):
         return CampaignStatus.PLANNED
     # A phase can be complete while a later phase has not been created yet.
-    if any(status in safety for status in statuses):
-        return CampaignStatus.FAILED
     return CampaignStatus.PLANNED
 
 
@@ -907,8 +928,10 @@ def summarize_run_artifacts(artifacts: Sequence[RunArtifact]) -> RunSummary:
 
 
 def _is_sha256(value: object) -> bool:
-    return isinstance(value, str) and len(value) == 64 and all(
-        character in "0123456789abcdef" for character in value
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
     )
 
 
@@ -938,6 +961,7 @@ __all__ = [
     "derive_case_id",
     "derive_campaign_status",
     "derive_run_id",
+    "highest_stop_reason",
     "plan_fingerprint",
     "result_status_to_work_status",
     "state_fingerprint",

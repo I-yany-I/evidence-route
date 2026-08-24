@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -83,9 +83,7 @@ def build_campaign_plan(
     validate_gate_a_cohorts(dev_claims, stability_claims)
     schedule = build_dev_schedule(dev_claims, seed=freeze.seed, campaign_id=campaign_id)
     adaptive_by_claim = {
-        item.claim_id: item.run_id
-        for item in schedule
-        if item.strategy is Strategy.ADAPTIVE
+        item.claim_id: item.run_id for item in schedule if item.strategy is Strategy.ADAPTIVE
     }
     links: list[StabilityBaselineLink] = []
     for claim in stability_claims:
@@ -178,6 +176,7 @@ def build_calibration_runtime_case(
     multi_summary: RunCallSummary,
     requested_alias: str,
     price_config_id: str,
+    request_sha256_by_call_id: Mapping[str, str],
 ) -> CalibrationRuntimeCase:
     """Bind one calibration case exclusively to persisted call-store accounting."""
 
@@ -193,17 +192,11 @@ def build_calibration_runtime_case(
             label=label,
         )
     model_ids = {
-        model_id
-        for summary in summaries.values()
-        for model_id in summary.response_model_ids_raw
+        model_id for summary in summaries.values() for model_id in summary.response_model_ids_raw
     }
     if len(model_ids) != 1:
         raise ValueError("calibration model drift detected across saved paths")
-    call_ids = [
-        call_id
-        for summary in summaries.values()
-        for call_id in summary.call_ids
-    ]
+    call_ids = [call_id for summary in summaries.values() for call_id in summary.call_ids]
     if len(call_ids) != len(set(call_ids)):
         raise ValueError("calibration call IDs must be unique across saved paths")
 
@@ -214,6 +207,7 @@ def build_calibration_runtime_case(
         "single_run_id": work.single_run_id,
         "multi_run_id": work.multi_run_id,
         "call_ids": call_ids,
+        "request_sha256_by_call_id": dict(request_sha256_by_call_id),
         "runtime_manifest_sha256": runtime_manifest_sha256,
         "features": features.model_dump(mode="json"),
         "saved_llm_route": saved_llm_route,
@@ -276,13 +270,9 @@ class GraphCampaignExecutor:
         self.components = GraphComponents(
             provider=provider,
             router=HybridRouter(app_config.routing, app_config.generation, llm=llm),
-            single=SingleVerifier(
-                provider, llm, app_config.evidence, app_config.generation
-            ),
+            single=SingleVerifier(provider, llm, app_config.evidence, app_config.generation),
             decomposer=ClaimDecomposer(llm, app_config.generation),
-            worker=EvidenceWorker(
-                provider, llm, app_config.evidence, app_config.generation
-            ),
+            worker=EvidenceWorker(provider, llm, app_config.evidence, app_config.generation),
             judge=VerdictJudge(llm, app_config.evidence, app_config.generation),
             validator=ResultValidator(
                 low_confidence=app_config.routing.low_confidence,

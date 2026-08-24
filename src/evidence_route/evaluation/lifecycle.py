@@ -24,6 +24,7 @@ from evidence_route.evaluation.activity import (
     FreezeMismatch,
     compare_freeze_identity,
     derive_activity_status,
+    derive_campaign_status,
 )
 
 _SHA256_RE = r"^[0-9a-f]{64}$"
@@ -110,9 +111,12 @@ def endpoint_config_hash(
 
 def _manifest_hash(value: Path | str | object, *, label: str) -> str:
     if isinstance(value, (str, Path)):
-        if isinstance(value, str) and len(value) == 64 and all(
-            char in "0123456789abcdef" for char in value
-        ) and not Path(value).is_file():
+        if (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(char in "0123456789abcdef" for char in value)
+            and not Path(value).is_file()
+        ):
             return value
         return sha256_file(Path(value))
     digest = getattr(value, "_manifest_sha256", None)
@@ -129,15 +133,24 @@ def _digest_input(
 ) -> str:
     """Accept either a file path or a previously audited lowercase digest."""
 
-    if explicit_digest is not None:
-        return _require_sha(explicit_digest, label=label)
     if value is None:
-        raise ValueError(f"{label} input is required")
-    if isinstance(value, str) and len(value) == 64 and all(
-        char in "0123456789abcdef" for char in value
-    ) and not Path(value).is_file():
-        return value
-    return sha256_file(value)
+        if explicit_digest is None:
+            raise ValueError(f"{label} input is required")
+        return _require_sha(explicit_digest, label=label)
+    if (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+        and not Path(value).is_file()
+    ):
+        actual = value
+    else:
+        actual = sha256_file(value)
+    if explicit_digest is not None:
+        expected = _require_sha(explicit_digest, label=label)
+        if actual != expected:
+            raise FreezeMismatch(label, expected=expected, actual=actual)
+    return actual
 
 
 def build_freeze_identity(
@@ -185,7 +198,8 @@ def build_freeze_identity(
             stability_manifest, label="stability manifest"
         ),
         corpus_preparation_receipt_sha256=_digest_input(
-            corpus_receipt, corpus_preparation_receipt_sha256,
+            corpus_receipt,
+            corpus_preparation_receipt_sha256,
             label="corpus_preparation_receipt_sha256",
         ),
         prompt_bundle_sha256=_digest_input(
@@ -243,6 +257,14 @@ def _git(repository_root: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
+def git_head(repository_root: Path | str) -> str:
+    """Return the exact repository HEAD used by a lifecycle freeze."""
+
+    value = _git(Path(repository_root), "rev-parse", "HEAD")
+    _require_sha(value, label="git HEAD", length=40)
+    return value
+
+
 def verify_git_freeze(
     repository_root: Path | str,
     *,
@@ -254,10 +276,10 @@ def verify_git_freeze(
     _require_sha(dev_protocol_git_sha, label="dev_protocol_git_sha", length=40)
     _require_sha(manifest_freeze_git_sha, label="manifest_freeze_git_sha", length=40)
     root = Path(repository_root).resolve()
-    status = _git(root, "status", "--porcelain", "--untracked-files=no")
+    status = _git(root, "status", "--porcelain")
     if status:
         raise FreezeMismatch("git_worktree_clean", expected=True, actual=False)
-    head = _git(root, "rev-parse", "HEAD")
+    head = git_head(root)
     if head != dev_protocol_git_sha:
         raise FreezeMismatch("dev_protocol_git_sha", expected=dev_protocol_git_sha, actual=head)
     try:
@@ -276,9 +298,9 @@ def verify_git_freeze(
 
 def _canonical_activity_bytes(activity: ActivityRecord) -> bytes:
     payload = activity.model_dump(mode="json")
-    return json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
 
 
 def activity_digest(activity: ActivityRecord) -> str:
@@ -386,8 +408,7 @@ def build_initial_activity(
         calibration_plan_sha256=calibration_plan_sha256,
         calibration_state_sha256=calibration_state_sha256,
         calibration_artifacts=[
-            CalibrationArtifactLink(case_id=case_id, artifact_sha256=None)
-            for case_id in case_ids
+            CalibrationArtifactLink(case_id=case_id, artifact_sha256=None) for case_id in case_ids
         ],
         freeze=freeze,
         campaign_plan_sha256=None,
@@ -431,12 +452,13 @@ def mark_calibration_complete(activity: ActivityRecord) -> ActivityRecord:
 
     if any(link.artifact_sha256 is None for link in activity.calibration_artifacts):
         raise ValueError("requires 32 completed calibration artifacts")
-    updated = activity.model_copy(
-        update={"calibration_status": CampaignStatus.COMPLETE}, deep=True
-    )
+    updated = activity.model_copy(update={"calibration_status": CampaignStatus.COMPLETE}, deep=True)
     updated.status = derive_activity_status(
-        updated.calibration_status, updated.dev_status, updated.stability_status,
-        stop_reason=updated.stop_reason, billing_uncertain=updated.billing_uncertain,
+        updated.calibration_status,
+        updated.dev_status,
+        updated.stability_status,
+        stop_reason=updated.stop_reason,
+        billing_uncertain=updated.billing_uncertain,
     )
     return ActivityRecord.model_validate(updated.model_dump(mode="python"))
 
@@ -457,6 +479,60 @@ def transition_activity_phase(
         raise ValueError("activity phase must be calibration, dev, or stability")
     if not isinstance(status, CampaignStatus):
         status = CampaignStatus(status)
+    current = getattr(activity, f"{phase}_status")
+    terminal_statuses = {
+        CampaignStatus.INTERRUPTED,
+        CampaignStatus.INCOMPLETE_BUDGET,
+        CampaignStatus.INCOMPLETE_MODEL_DRIFT,
+        CampaignStatus.INCOMPLETE_USAGE,
+        CampaignStatus.INCOMPLETE_COST_UNCERTAIN,
+        CampaignStatus.CANCELLED,
+        CampaignStatus.FAILED,
+    }
+    if (
+        current is CampaignStatus.COMPLETE
+        and status is not CampaignStatus.COMPLETE
+        and not (status in terminal_statuses and stop_reason is not None)
+    ):
+        raise ValueError(f"{phase} phase is already terminal")
+    if (
+        current
+        in {
+            CampaignStatus.INCOMPLETE_BUDGET,
+            CampaignStatus.INCOMPLETE_MODEL_DRIFT,
+            CampaignStatus.INCOMPLETE_USAGE,
+            CampaignStatus.INCOMPLETE_COST_UNCERTAIN,
+            CampaignStatus.CANCELLED,
+            CampaignStatus.FAILED,
+        }
+        and status is not current
+    ):
+        raise ValueError(f"{phase} phase is already terminal")
+    if phase in {"dev", "stability"} and status is not CampaignStatus.PLANNED:
+        if activity.calibration_status is not CampaignStatus.COMPLETE:
+            raise ValueError("calibration must be complete before dev or stability")
+        if phase == "stability" and activity.dev_status is not CampaignStatus.COMPLETE:
+            raise ValueError("dev must be complete before stability")
+    effective_stop_reason = stop_reason or activity.stop_reason
+    if effective_stop_reason is CampaignStopReason.BILLING_UNCERTAIN:
+        if billing_uncertain is False:
+            raise ValueError("billing stop requires billing_uncertain=True")
+        if billing_uncertain is not True:
+            raise ValueError("billing stop requires billing_uncertain=True")
+    elif billing_uncertain is True:
+        raise ValueError("billing_uncertain=True requires a billing stop reason")
+    if activity.stop_reason is not None and status in {
+        CampaignStatus.PLANNED,
+        CampaignStatus.RUNNING,
+        CampaignStatus.COMPLETE,
+    }:
+        raise ValueError("activity has a terminal stop reason")
+    if status in terminal_statuses and stop_reason is None:
+        raise ValueError("terminal activity status requires a typed stop reason")
+    if stop_reason is not None:
+        expected_status = derive_campaign_status([], stop_reason=stop_reason)
+        if status is not expected_status:
+            raise ValueError("activity phase status does not match stop reason")
     updates: dict[str, object] = {f"{phase}_status": status}
     if stop_reason is not None:
         if activity.stop_reason is not None and activity.stop_reason is not stop_reason:
@@ -479,6 +555,32 @@ def transition_activity_phase(
         updated.stability_status,
         stop_reason=updated.stop_reason,
         billing_uncertain=updated.billing_uncertain,
+    )
+    return ActivityRecord.model_validate(updated.model_dump(mode="python"))
+
+
+def resume_activity_phase(activity: ActivityRecord, *, phase: str) -> ActivityRecord:
+    """Atomically clear the sole resumable process-interruption marker."""
+
+    if phase not in {"calibration", "dev", "stability"}:
+        raise ValueError("activity phase must be calibration, dev, or stability")
+    if activity.stop_reason is not CampaignStopReason.PROCESS_INTERRUPTION:
+        raise ValueError("only process_interruption can be resumed")
+    if getattr(activity, f"{phase}_status") is not CampaignStatus.INTERRUPTED:
+        raise ValueError("phase is not interrupted")
+    updated = activity.model_copy(
+        update={
+            f"{phase}_status": CampaignStatus.RUNNING,
+            "stop_reason": None,
+            "billing_uncertain": False,
+        },
+        deep=True,
+    )
+    updated.status = derive_activity_status(
+        updated.calibration_status,
+        updated.dev_status,
+        updated.stability_status,
+        billing_uncertain=False,
     )
     return ActivityRecord.model_validate(updated.model_dump(mode="python"))
 
@@ -533,10 +635,12 @@ __all__ = [
     "build_freeze_identity",
     "build_initial_activity",
     "endpoint_config_hash",
+    "git_head",
     "link_calibration_artifact",
     "load_activity",
     "mark_calibration_complete",
     "persist_activity",
+    "resume_activity_phase",
     "seal_activity",
     "sha256_bytes",
     "sha256_file",

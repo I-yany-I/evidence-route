@@ -137,6 +137,7 @@ class CalibrationRuntimeCase(StrictModel):
     single_run_id: str = Field(pattern=_SHA256_PATTERN)
     multi_run_id: str = Field(pattern=_SHA256_PATTERN)
     call_ids: list[str] = Field(min_length=1)
+    request_sha256_by_call_id: dict[str, str] = Field(min_length=1)
     runtime_manifest_sha256: str = Field(pattern=_SHA256_PATTERN)
     features: ClaimFeatures
     saved_llm_route: Literal["single", "multi"]
@@ -162,6 +163,13 @@ class CalibrationRuntimeCase(StrictModel):
             raise ValueError("multi calibration result must have initial_route=multi")
         if len(self.call_ids) != len(set(self.call_ids)):
             raise ValueError("calibration call IDs must be unique")
+        if set(self.request_sha256_by_call_id) != set(self.call_ids):
+            raise ValueError("calibration request fingerprints must match call IDs")
+        if any(
+            len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest)
+            for digest in self.request_sha256_by_call_id.values()
+        ):
+            raise ValueError("calibration request fingerprints must be lowercase SHA-256")
         if len({self.router_run_id, self.single_run_id, self.multi_run_id}) != 3:
             raise ValueError("calibration run IDs must be distinct")
         return self
@@ -217,9 +225,9 @@ class CandidateOutcome(StrictModel):
 class CalibrationReplay(StrictModel):
     schema_version: Literal["1"] = "1"
     scope: Literal["train_calibration_only"] = "train_calibration_only"
-    warning: Literal[
+    warning: Literal["Train-only policy selection; this is not final dev performance."] = (
         "Train-only policy selection; this is not final dev performance."
-    ] = "Train-only policy selection; this is not final dev performance."
+    )
     activity_id: str = Field(min_length=1)
     runtime_manifest_sha256: str = Field(pattern=_SHA256_PATTERN)
     prompt_bundle_sha256: str = Field(pattern=_SHA256_PATTERN)
@@ -255,9 +263,7 @@ class CalibrationReplay(StrictModel):
             raise ValueError("calibration report quality floor is inconsistent")
         if self.selected.macro_f1 < self.quality_floor_macro_f1:
             raise ValueError("selected calibration candidate is below the quality floor")
-        expected_selected = choose_candidate(
-            self.candidates, tolerance=self.quality_tolerance
-        )
+        expected_selected = choose_candidate(self.candidates, tolerance=self.quality_tolerance)
         if self.selected != expected_selected:
             raise ValueError(
                 "selected calibration candidate differs from the pre-registered tie-break"
@@ -292,9 +298,7 @@ def state_fingerprint(state: CalibrationState | Mapping[str, object]) -> str:
 
 def runtime_case_fingerprint(case: CalibrationRuntimeCase | Mapping[str, object]) -> str:
     payload = (
-        case.model_dump(mode="json")
-        if isinstance(case, CalibrationRuntimeCase)
-        else dict(case)
+        case.model_dump(mode="json") if isinstance(case, CalibrationRuntimeCase) else dict(case)
     )
     payload.pop("artifact_sha256", None)
     return stable_hash(payload)
@@ -421,6 +425,7 @@ def build_calibration_runtime_case(
     plan: CalibrationPlan,
     work: CalibrationWorkItem,
     call_ids: Sequence[str],
+    request_sha256_by_call_id: Mapping[str, str],
     features: ClaimFeatures,
     saved_llm_route: Literal["single", "multi"],
     router_usage: Usage,
@@ -429,7 +434,7 @@ def build_calibration_runtime_case(
     multi_result: VerificationResult,
     response_model_ids_raw: Sequence[str],
 ) -> CalibrationRuntimeCase:
-    """Seal one fully accounted router + single + three-worker multi collection."""
+    """Seal one fully accounted router + single + one-to-three-worker multi collection."""
 
     verify_plan_fingerprint(plan)
     _index, expected_work = _work_for_case(plan, work.case_id)
@@ -437,14 +442,20 @@ def build_calibration_runtime_case(
         raise ValueError("calibration work item differs from the immutable plan")
     calls = list(call_ids)
     model_ids = list(response_model_ids_raw)
-    if len(calls) < 7:
-        raise ValueError("complete calibration collection requires at least seven calls")
+    # The base graph has router, single, decomposer, one-to-three workers, and judge
+    # (five to seven calls). Repair attempts add calls, so do not infer worker count
+    # from the aggregate call list; slot-level validation belongs to the persisted ledger.
+    if len(calls) < 5:
+        raise ValueError("complete calibration collection requires one to three workers")
     if len(model_ids) != len(calls):
         raise ValueError("calibration response model IDs must align with call IDs")
     if any(not value.strip() for value in calls + model_ids):
         raise ValueError("calibration call and response model IDs must be non-empty")
     if len(set(model_ids)) != 1:
         raise ValueError("calibration case observed response model drift")
+    fingerprints = dict(request_sha256_by_call_id)
+    if set(fingerprints) != set(calls):
+        raise ValueError("calibration request fingerprints must match call IDs")
     payload: dict[str, object] = {
         "claim_id": work.claim_id,
         "case_id": work.case_id,
@@ -452,6 +463,7 @@ def build_calibration_runtime_case(
         "single_run_id": work.single_run_id,
         "multi_run_id": work.multi_run_id,
         "call_ids": calls,
+        "request_sha256_by_call_id": fingerprints,
         "runtime_manifest_sha256": plan.runtime_manifest_sha256,
         "features": features.model_dump(mode="json"),
         "saved_llm_route": saved_llm_route,
@@ -519,9 +531,7 @@ def persist_calibration_plan(
 
 
 def load_calibration_plan(path: Path | str) -> CalibrationPlan:
-    plan = _read_model(
-        Path(path), CalibrationPlan, label="calibration plan"
-    )
+    plan = _read_model(Path(path), CalibrationPlan, label="calibration plan")
     assert isinstance(plan, CalibrationPlan)
     verify_plan_fingerprint(plan)
     return plan
@@ -541,9 +551,7 @@ def load_calibration_state(
     *,
     expected_plan: CalibrationPlan | None = None,
 ) -> CalibrationState:
-    state = _read_model(
-        Path(path), CalibrationState, label="calibration state"
-    )
+    state = _read_model(Path(path), CalibrationState, label="calibration state")
     assert isinstance(state, CalibrationState)
     verify_state_fingerprint(state)
     if expected_plan is not None:
@@ -659,9 +667,7 @@ def load_calibration_case(
     work: CalibrationWorkItem | None = None,
     plan: CalibrationPlan | None = None,
 ) -> CalibrationRuntimeCase:
-    case = _read_model(
-        Path(path), CalibrationRuntimeCase, label="calibration runtime case"
-    )
+    case = _read_model(Path(path), CalibrationRuntimeCase, label="calibration runtime case")
     assert isinstance(case, CalibrationRuntimeCase)
     verify_runtime_case_fingerprint(case)
     if (work is None) != (plan is None):
@@ -720,10 +726,7 @@ def reconcile_calibration_state(
         destination = _case_path(activity_root, item.artifact_relpath)
         if destination.is_file():
             case = load_calibration_case(destination, work=work, plan=plan)
-            if (
-                item.artifact_sha256 is not None
-                and item.artifact_sha256 != case.artifact_sha256
-            ):
+            if item.artifact_sha256 is not None and item.artifact_sha256 != case.artifact_sha256:
                 raise ValueError("calibration state artifact SHA-256 differs from the case")
             item.status = CalibrationItemStatus.COMPLETE
             item.artifact_sha256 = case.artifact_sha256
@@ -900,9 +903,7 @@ def replay_candidate(
         )
         total_tokens = router_tokens + runtime.multi_result.usage.total_tokens
         total_cost = router_cost + _result_cost(runtime.multi_result)
-        executed_path = (
-            "multi_failed" if validation_action is ValidationAction.FAIL else "multi"
-        )
+        executed_path = "multi_failed" if validation_action is ValidationAction.FAIL else "multi"
 
     decision = ReplayDecision(
         claim_id=runtime.claim_id,
@@ -951,9 +952,7 @@ def score_candidate(
         total_tokens=sum(outcome.total_tokens for outcome in replayed),
         llm_router_calls=llm_router_calls,
         llm_router_rate=llm_router_calls / len(cases),
-        simulated_cost_micro_cny=sum(
-            outcome.simulated_cost_micro_cny for outcome in replayed
-        ),
+        simulated_cost_micro_cny=sum(outcome.simulated_cost_micro_cny for outcome in replayed),
         settings=settings_payload,
         clear_multi_clauses=settings.clear_multi_clauses,
         clear_single_min_sources=settings.clear_single_min_sources,
@@ -1017,14 +1016,10 @@ def _score_fixed_baseline(
                 else Strategy.ALWAYS_MULTI
             ),
         )
-        source_result = (
-            runtime.single_result if route == "single" else runtime.multi_result
-        )
+        source_result = runtime.single_result if route == "single" else runtime.multi_result
         tokens = source_result.usage.total_tokens
         cost = _result_cost(source_result)
-        executed_path = (
-            f"{route}_failed" if action is ValidationAction.FAIL else route
-        )
+        executed_path = f"{route}_failed" if action is ValidationAction.FAIL else route
         decisions.append(
             ReplayDecision(
                 claim_id=runtime.claim_id,
@@ -1197,9 +1192,7 @@ def write_calibration_outputs(
         raise ValueError("calibrated config changed a non-routing value")
     if reloaded.get("routing") != selected_routing.model_dump(mode="json"):
         raise ValueError("calibrated config routing values differ from the selected candidate")
-    replay.calibrated_config_sha256 = hashlib.sha256(
-        Path(output_config).read_bytes()
-    ).hexdigest()
+    replay.calibrated_config_sha256 = hashlib.sha256(Path(output_config).read_bytes()).hexdigest()
     sealed = CalibrationReplay.model_validate(replay.model_dump(mode="json"))
     write_canonical_json(output_report, sealed)
     return sealed
@@ -1263,8 +1256,17 @@ def write_canonical_json(path: Path | str, payload: object) -> None:
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode("utf-8")
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_bytes(encoded)
-    os.replace(temporary, path)
+    try:
+        with temporary.open("wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 __all__ = [

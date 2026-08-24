@@ -38,15 +38,21 @@ class HybridRouter:
         self.config_hash = stable_hash(settings.model_dump(mode="json"))
 
     async def route(
-        self, run_id: str, strategy: Strategy, features: ClaimFeatures
+        self,
+        run_id: str,
+        strategy: Strategy,
+        features: ClaimFeatures,
+        *,
+        allow_repair: bool = True,
+        force_llm: bool = False,
     ) -> RouteDecision:
         if strategy == Strategy.ALWAYS_MULTI:
             return self._decision("multi", "strategy", ["fixed_multi"])
         if strategy == Strategy.ALWAYS_SINGLE:
             return self._decision("single", "strategy", ["fixed_single"])
-        if self._clear_multi(features):
+        if not force_llm and self._clear_multi(features):
             return self._decision("multi", "rule", ["compound_or_conflict"])
-        if self._clear_single(features):
+        if not force_llm and self._clear_single(features):
             return self._decision("single", "rule", ["atomic_with_sources"])
         if self.llm is None:
             return self._decision("multi", "fallback", ["router_fallback"])
@@ -59,6 +65,7 @@ class HybridRouter:
                 schema=RouterPayload,
                 max_input_tokens=self.generation.router.max_input_tokens,
                 max_output_tokens=self.generation.router.max_output_tokens,
+                allow_repair=allow_repair,
             )
             payload = result.value
             return self._decision(payload.route, "llm", payload.reason_codes, payload.explanation)

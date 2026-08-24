@@ -1,0 +1,8 @@
+# Deterministic, non-billing rates for the offline Gate A budget preview.
+# Replace this file with configs/pricing.local.yaml for a real provider run.
+provider: offline-dry-run
+currency: CNY
+input_per_million: 1.0
+output_per_million: 2.0
+price_source: offline-dry-run-placeholder-2026-08-24
+strict_evaluation: true

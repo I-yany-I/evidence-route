@@ -28,5 +28,5 @@ generation:
   max_transport_attempts: 3
   max_repairs_per_node: 1
 budget:
-  estimated_cost_cap_cny: 350.0
+  estimated_cost_cap_cny: 500.0
   reserve_ratio: 0.2

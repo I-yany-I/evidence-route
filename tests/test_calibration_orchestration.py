@@ -41,10 +41,7 @@ SHA = "a" * 64
 
 
 def _plan():
-    claims = [
-        SimpleNamespace(claim_id=f"train-{index}", split="train")
-        for index in range(32)
-    ]
+    claims = [SimpleNamespace(claim_id=f"train-{index}", split="train") for index in range(32)]
     return build_calibration_plan(
         claims,
         activity_id="gate-a",
@@ -95,9 +92,7 @@ def _runtime_cases(calibration_case, plan):
         single = calibration_case.runtime.single_result.model_copy(
             update={"claim_id": item.claim_id}
         )
-        multi = calibration_case.runtime.multi_result.model_copy(
-            update={"claim_id": item.claim_id}
-        )
+        multi = calibration_case.runtime.multi_result.model_copy(update={"claim_id": item.claim_id})
         payload = calibration_case.runtime.model_dump(mode="json")
         payload.update(
             {
@@ -109,6 +104,9 @@ def _runtime_cases(calibration_case, plan):
                 "runtime_manifest_sha256": plan.runtime_manifest_sha256,
                 "requested_alias": plan.requested_alias,
                 "call_ids": [f"{item.case_id}-{index}" for index in range(7)],
+                "request_sha256_by_call_id": {
+                    f"{item.case_id}-{index}": f"{index + 1}" * 64 for index in range(7)
+                },
                 "single_result": single.model_dump(mode="json"),
                 "multi_result": multi.model_dump(mode="json"),
                 "artifact_sha256": "0" * 64,
@@ -149,6 +147,7 @@ def test_runtime_case_builder_seals_plan_identity(calibration_case) -> None:
         plan=plan,
         work=work,
         call_ids=[f"call-{index}" for index in range(7)],
+        request_sha256_by_call_id={f"call-{index}": f"{index + 1}" * 64 for index in range(7)},
         features=calibration_case.runtime.features,
         saved_llm_route="single",
         router_usage=calibration_case.runtime.router_usage,
@@ -161,6 +160,74 @@ def test_runtime_case_builder_seals_plan_identity(calibration_case) -> None:
     assert case.case_id == work.case_id
     assert case.requested_alias == plan.requested_alias
     assert case.artifact_sha256 == runtime_case_fingerprint(case)
+
+
+@pytest.mark.parametrize("worker_count", [1, 2, 3])
+def test_runtime_case_builder_accepts_actual_worker_count(
+    calibration_case, worker_count: int
+) -> None:
+    plan = _plan()
+    work = plan.items[0]
+    call_ids = [f"call-{index}" for index in range(4 + worker_count)]
+
+    case = build_calibration_runtime_case(
+        plan=plan,
+        work=work,
+        call_ids=call_ids,
+        request_sha256_by_call_id={call_id: "a" * 64 for call_id in call_ids},
+        features=calibration_case.runtime.features,
+        saved_llm_route="single",
+        router_usage=calibration_case.runtime.router_usage,
+        router_actual_cost_micro_cny=12,
+        single_result=calibration_case.runtime.single_result,
+        multi_result=calibration_case.runtime.multi_result,
+        response_model_ids_raw=["relay-model"] * len(call_ids),
+    )
+
+    assert len(case.call_ids) == 4 + worker_count
+
+
+def test_runtime_case_builder_allows_repair_calls(calibration_case) -> None:
+    plan = _plan()
+    work = plan.items[0]
+    call_ids = [f"call-{index}" for index in range(8)]
+
+    case = build_calibration_runtime_case(
+        plan=plan,
+        work=work,
+        call_ids=call_ids,
+        request_sha256_by_call_id={call_id: "b" * 64 for call_id in call_ids},
+        features=calibration_case.runtime.features,
+        saved_llm_route="single",
+        router_usage=calibration_case.runtime.router_usage,
+        router_actual_cost_micro_cny=12,
+        single_result=calibration_case.runtime.single_result,
+        multi_result=calibration_case.runtime.multi_result,
+        response_model_ids_raw=["relay-model"] * len(call_ids),
+    )
+
+    assert len(case.call_ids) == 8
+
+
+def test_runtime_case_builder_requires_a_worker(calibration_case) -> None:
+    plan = _plan()
+    work = plan.items[0]
+    call_ids = [f"call-{index}" for index in range(4)]
+
+    with pytest.raises(ValueError, match="one to three workers"):
+        build_calibration_runtime_case(
+            plan=plan,
+            work=work,
+            call_ids=call_ids,
+            request_sha256_by_call_id={call_id: "c" * 64 for call_id in call_ids},
+            features=calibration_case.runtime.features,
+            saved_llm_route="single",
+            router_usage=calibration_case.runtime.router_usage,
+            router_actual_cost_micro_cny=12,
+            single_result=calibration_case.runtime.single_result,
+            multi_result=calibration_case.runtime.multi_result,
+            response_model_ids_raw=["relay-model"] * len(call_ids),
+        )
 
 
 def test_loading_cases_rejects_tampered_file(tmp_path, calibration_case) -> None:
@@ -190,9 +257,7 @@ def test_resume_reconciles_closed_case_before_state_update(tmp_path, calibration
 
     assert reconciled.items[0].status is CalibrationItemStatus.COMPLETE
     assert reconciled.items[0].artifact_sha256 == case.artifact_sha256
-    assert all(
-        item.status is CalibrationItemStatus.PENDING for item in reconciled.items[1:]
-    )
+    assert all(item.status is CalibrationItemStatus.PENDING for item in reconciled.items[1:])
     verify_state_fingerprint(reconciled)
 
 

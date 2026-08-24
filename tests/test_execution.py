@@ -33,6 +33,18 @@ def test_price_loader_rejects_non_cny_strict_config(tmp_path: Path) -> None:
         load_price_config(path)
 
 
+def test_price_loader_rejects_offline_dry_run_for_execution(tmp_path: Path) -> None:
+    path = tmp_path / "pricing.yaml"
+    path.write_text(
+        "provider: offline-dry-run\ncurrency: CNY\ninput_per_million: 1\n"
+        "output_per_million: 2\nprice_source: placeholder\nstrict_evaluation: true\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="offline-dry-run"):
+        load_price_config(path)
+
+
 def test_build_run_artifact_binds_graph_result_to_store_summary() -> None:
     result = VerificationResult(
         claim_id="dev-0",

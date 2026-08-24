@@ -71,6 +71,15 @@ class FakeLLM:
         )()
 
 
+class CountingLLM(FakeLLM):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, **kwargs: object):
+        self.calls += 1
+        return await super().invoke(**kwargs)
+
+
 class FailingLLM:
     async def invoke(self, **kwargs: object):
         raise StructuredCallError("router unavailable")
@@ -99,15 +108,32 @@ async def test_uncertain_route_uses_structured_llm() -> None:
 
 
 @pytest.mark.asyncio
+async def test_force_llm_bypasses_compound_rule() -> None:
+    llm = CountingLLM()
+    claim_features = features(
+        atomic_clause_count=2,
+        claim_units=[ClaimUnit(unit_id="u0", text="one"), ClaimUnit(unit_id="u1", text="two")],
+        has_comparison=True,
+    )
+    decision = await HybridRouter(
+        RoutingSettings(clear_multi_clauses=999, clear_single_min_sources=999),
+        GenerationSettings(),
+        llm=llm,
+    ).route("run", Strategy.ADAPTIVE, claim_features, force_llm=True)
+    assert decision.source == "llm"
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_router_failure_falls_back_to_multi() -> None:
     claim_features = features(
         atomic_clause_count=2,
         claim_units=[ClaimUnit(unit_id="u0", text="one"), ClaimUnit(unit_id="u1", text="two")],
         probe_source_count=1,
     )
-    decision = await HybridRouter(
-        RoutingSettings(), GenerationSettings(), llm=FailingLLM()
-    ).route("run", Strategy.ADAPTIVE, claim_features)
+    decision = await HybridRouter(RoutingSettings(), GenerationSettings(), llm=FailingLLM()).route(
+        "run", Strategy.ADAPTIVE, claim_features
+    )
     assert decision.source == "fallback"
     assert decision.route == "multi"
     assert decision.config_hash == stable_hash(RoutingSettings().model_dump(mode="json"))
@@ -121,8 +147,6 @@ async def test_router_propagates_safety_stops(error: Exception) -> None:
         claim_units=[ClaimUnit(unit_id="u0", text="one"), ClaimUnit(unit_id="u1", text="two")],
         probe_source_count=1,
     )
-    router = HybridRouter(
-        RoutingSettings(), GenerationSettings(), llm=SafetyStopLLM(error)
-    )
+    router = HybridRouter(RoutingSettings(), GenerationSettings(), llm=SafetyStopLLM(error))
     with pytest.raises(type(error), match=str(error)):
         await router.route("run", Strategy.ADAPTIVE, claim_features)

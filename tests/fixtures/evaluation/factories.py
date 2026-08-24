@@ -43,9 +43,7 @@ def _result(claim_id: str, verdict: Verdict, status: ResultStatus = ResultStatus
 
 @pytest.fixture
 def runtime_claims():
-    return load_runtime_manifest(
-        FIXTURE_ROOT / "runtime.json", allowed_root=FIXTURE_ROOT
-    ).items
+    return load_runtime_manifest(FIXTURE_ROOT / "runtime.json", allowed_root=FIXTURE_ROOT).items
 
 
 @pytest.fixture
@@ -110,6 +108,11 @@ def calibration_case() -> CalibrationScoredCase:
         single_run_id="c" * 64,
         multi_run_id="d" * 64,
         call_ids=["router-0", "single-0", "multi-0"],
+        request_sha256_by_call_id={
+            "router-0": "1" * 64,
+            "single-0": "2" * 64,
+            "multi-0": "3" * 64,
+        },
         runtime_manifest_sha256="e" * 64,
         features=features,
         saved_llm_route="single",

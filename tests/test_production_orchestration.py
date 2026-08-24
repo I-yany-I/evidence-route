@@ -60,8 +60,10 @@ def _bounds() -> CallBounds:
 
 def test_campaign_plan_uses_exact_stability_manifest_order() -> None:
     dev = [SimpleNamespace(claim_id=f"dev-{index}") for index in range(80)]
-    stability = [dev[index] for index in (79, 3, 41, 7, 19, 22, 28, 31, 35, 39,
-                                          44, 48, 52, 56, 60, 64, 68, 72, 76, 0)]
+    stability = [
+        dev[index]
+        for index in (79, 3, 41, 7, 19, 22, 28, 31, 35, 39, 44, 48, 52, 56, 60, 64, 68, 72, 76, 0)
+    ]
     validate_gate_a_cohorts(dev, stability)
     plan = build_campaign_plan(
         dev,
@@ -104,13 +106,23 @@ def test_campaign_plan_fingerprint_changes_with_frozen_routing_config() -> None:
     dev = [SimpleNamespace(claim_id=f"dev-{index}") for index in range(80)]
     stability = dev[:20]
     first = build_campaign_plan(
-        dev, stability, activity_id="activity", campaign_id="campaign", freeze=_freeze(),
-        cap_micro_cny=350_000_000, call_bounds=_bounds(),
+        dev,
+        stability,
+        activity_id="activity",
+        campaign_id="campaign",
+        freeze=_freeze(),
+        cap_micro_cny=350_000_000,
+        call_bounds=_bounds(),
     )
     changed = _freeze().model_copy(update={"config_sha256": stable_hash({"routing": 1})})
     second = build_campaign_plan(
-        dev, stability, activity_id="activity", campaign_id="campaign", freeze=changed,
-        cap_micro_cny=350_000_000, call_bounds=_bounds(),
+        dev,
+        stability,
+        activity_id="activity",
+        campaign_id="campaign",
+        freeze=changed,
+        cap_micro_cny=350_000_000,
+        call_bounds=_bounds(),
     )
     assert first.campaign_fingerprint != second.campaign_fingerprint
 
@@ -169,9 +181,7 @@ async def test_graph_campaign_executor_returns_accounted_artifact_and_reuses_che
         pricing=pricing,
     )
     transport = _Transport()
-    run_id = derive_run_id(
-        "campaign", "dev", "dev-0", Strategy.ALWAYS_SINGLE, 0
-    )
+    run_id = derive_run_id("campaign", "dev", "dev-0", Strategy.ALWAYS_SINGLE, 0)
     work = CampaignWorkItem(
         order=0,
         phase="dev",
@@ -261,6 +271,11 @@ def test_calibration_runtime_case_uses_only_persisted_accounting(
         multi_summary=_summary("multi-call", 20, 23),
         requested_alias="relay-model",
         price_config_id="9" * 64,
+        request_sha256_by_call_id={
+            "router-call": "1" * 64,
+            "single-call": "2" * 64,
+            "multi-call": "3" * 64,
+        },
     )
 
     assert case.call_ids == ["router-call", "single-call", "multi-call"]
@@ -298,4 +313,9 @@ def test_calibration_runtime_case_rejects_model_drift(calibration_case) -> None:
             multi_summary=drifted,
             requested_alias="relay-model",
             price_config_id="9" * 64,
+            request_sha256_by_call_id={
+                "router-call": "1" * 64,
+                "single-call": "2" * 64,
+                "multi-call": "3" * 64,
+            },
         )

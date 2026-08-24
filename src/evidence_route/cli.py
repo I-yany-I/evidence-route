@@ -23,6 +23,8 @@ from evidence_route.config import (
     stable_hash,
 )
 from evidence_route.contracts import Strategy, StrictModel
+from evidence_route.evaluation.production_calibration import ProductionCalibrationCollector
+from evidence_route.evaluation.production_evaluation import ProductionCampaignService
 from evidence_route.evaluation.reporting import ReportInput, build_report_bundle
 from evidence_route.evaluation.runner import (
     compute_gate_a_call_profile,
@@ -88,13 +90,48 @@ class ProviderSmokeResult(StrictModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
     estimated_cost_micro_cny: int = Field(ge=0)
-    call_ids: list[
-        Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
-    ] = Field(min_length=1, max_length=1)
+    call_ids: list[Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]] = Field(
+        min_length=1, max_length=1
+    )
     endpoint_config_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+def _resolve_from(root: Path, value: object) -> Path:
+    path = Path(value)
+    return path.resolve() if path.is_absolute() else (root / path).resolve()
+
+
 class ProductionServices:
+    def __init__(
+        self,
+        *,
+        transport_factory: object | None = None,
+        transport: object | None = None,
+        executor_factory: object | None = None,
+        repository_root: Path | None = None,
+    ) -> None:
+        if transport_factory is None and transport is not None:
+
+            def transport_factory(settings: object) -> object:
+                del settings
+                return transport
+
+        if transport_factory is None:
+
+            def transport_factory(settings: object) -> object:
+                return OpenAITransport(settings)  # type: ignore[arg-type]
+
+        self._calibration_collector = ProductionCalibrationCollector(
+            transport_factory=transport_factory,  # type: ignore[arg-type]
+            executor_factory=executor_factory,  # type: ignore[arg-type]
+            repository_root=repository_root,
+        )
+        self._campaign_service = ProductionCampaignService(
+            transport_factory=transport_factory,  # type: ignore[arg-type]
+            executor_factory=executor_factory,  # type: ignore[arg-type]
+            repository_root=repository_root,
+        )
+
     def verify(self, **kwargs: object) -> dict[str, object]:
         return asyncio.run(self._verify_async(**kwargs))
 
@@ -130,13 +167,9 @@ class ProductionServices:
         components = GraphComponents(
             provider=provider,
             router=HybridRouter(app_config.routing, app_config.generation, llm=llm),
-            single=SingleVerifier(
-                provider, llm, app_config.evidence, app_config.generation
-            ),
+            single=SingleVerifier(provider, llm, app_config.evidence, app_config.generation),
             decomposer=ClaimDecomposer(llm, app_config.generation),
-            worker=EvidenceWorker(
-                provider, llm, app_config.evidence, app_config.generation
-            ),
+            worker=EvidenceWorker(provider, llm, app_config.evidence, app_config.generation),
             judge=VerdictJudge(llm, app_config.evidence, app_config.generation),
             validator=ResultValidator(
                 low_confidence=app_config.routing.low_confidence,
@@ -204,9 +237,7 @@ class ProductionServices:
         expected = CapabilityPayload(ok=True, nonce=nonce)
         app_config = load_app_config(config_path)
         pricing = load_price_config(pricing_path)
-        endpoint_config_hash = stable_hash(
-            {"base_url": ensure_v1(app_config.llm.base_url)}
-        )
+        endpoint_config_hash = stable_hash({"base_url": ensure_v1(app_config.llm.base_url)})
         run_id = stable_hash({"kind": "provider-smoke", "nonce": nonce})
         run_store = SQLiteRunStore(
             artifact_dir / "run-store.sqlite3",
@@ -231,8 +262,7 @@ class ProductionServices:
                 {
                     "role": "user",
                     "content": (
-                        "Echo this capability payload exactly: "
-                        f"{expected.model_dump_json()}"
+                        f"Echo this capability payload exactly: {expected.model_dump_json()}"
                     ),
                 },
             ],
@@ -296,34 +326,53 @@ class ProductionServices:
         }
 
     def evaluate(self, **kwargs: object) -> dict[str, object]:
-        raise RuntimeError("production campaign executor is not configured")
+        return asyncio.run(self._campaign_service.evaluate(**kwargs))
 
     def calibrate_collect(self, **kwargs: object) -> dict[str, object]:
-        raise RuntimeError("production calibration executor is not configured")
+        return asyncio.run(self._calibrate_collect_async(**kwargs))
+
+    async def _calibrate_collect_async(self, **kwargs: object) -> dict[str, object]:
+        return await self._calibration_collector.collect(**kwargs)
 
     def calibrate_replay(self, **kwargs: object) -> dict[str, object]:
-        raise RuntimeError("calibration replay requires collected case artifacts")
+        return self._calibration_collector.replay(**kwargs)
 
     def report(self, **kwargs: object) -> dict[str, object]:
-        activity_dir = Path(kwargs["activity_dir"])
-        output_dir = Path(kwargs["output_dir"])
+        repository_root = Path(kwargs["repository_root"]).resolve()
+        activity_dir = _resolve_from(repository_root, kwargs["activity_dir"])
+        output_dir = _resolve_from(repository_root, kwargs["output_dir"])
         publish = bool(kwargs["publish"])
         readme_value = kwargs.get("readme")
-        nltk_value = os.environ.get("NLTK_DATA")
         bundle = build_report_bundle(
             ReportInput(
-                repository_root=Path.cwd(),
+                repository_root=repository_root,
                 activity_dir=activity_dir,
-                gold_manifest=Path(kwargs["gold_manifest"]),
-                nltk_data_root=(
-                    Path(nltk_value) if nltk_value else Path("data/external/nltk")
+                gold_manifest=_resolve_from(repository_root, kwargs["gold_manifest"]),
+                nltk_data_root=_resolve_from(repository_root, kwargs["nltk_data_root"]),
+                run_store=_resolve_from(repository_root, kwargs["run_store"]),
+                runtime_manifest=_resolve_from(repository_root, kwargs["runtime_manifest"]),
+                calibration_runtime_manifest=_resolve_from(
+                    repository_root, kwargs["calibration_runtime_manifest"]
                 ),
+                stability_runtime_manifest=_resolve_from(
+                    repository_root, kwargs["stability_runtime_manifest"]
+                ),
+                calibration_report=_resolve_from(repository_root, kwargs["calibration_report"]),
+                calibrated_config=_resolve_from(repository_root, kwargs["calibrated_config"]),
+                corpus_preparation_receipt=_resolve_from(
+                    repository_root, kwargs["corpus_preparation_receipt"]
+                ),
+                prompt_bundle=_resolve_from(repository_root, kwargs["prompt_bundle"]),
+                pricing=_resolve_from(repository_root, kwargs["pricing"]),
+                requirements_lock=_resolve_from(repository_root, kwargs["requirements_lock"]),
             ),
             publish=publish,
         )
         bundle.write(
             output_dir,
-            readme=Path(readme_value) if readme_value is not None else None,
+            readme=(
+                _resolve_from(repository_root, readme_value) if readme_value is not None else None
+            ),
         )
         return {
             "publishable": bundle.publication_gate.publishable,
@@ -342,15 +391,15 @@ def create_app(services: CliServices) -> typer.Typer:
         claim_id: Annotated[str, typer.Option("--claim-id")] = ...,
         claim: Annotated[str, typer.Option("--claim")] = ...,
         strategy: Annotated[str, typer.Option("--strategy")] = "adaptive",
-        corpus_dir: Annotated[
-            Path, typer.Option("--corpus-dir")
-        ] = Path("data/processed/averitec/corpora"),
+        corpus_dir: Annotated[Path, typer.Option("--corpus-dir")] = Path(
+            "data/processed/averitec/corpora"
+        ),
         config_path: Annotated[Path, typer.Option("--config")] = Path("configs/default.yaml"),
         pricing_path: Annotated[Path | None, typer.Option("--pricing")] = None,
         artifact_dir: Annotated[Path, typer.Option("--artifact-dir")] = Path("artifacts"),
-        checkpoint_db: Annotated[
-            Path, typer.Option("--checkpoint-db")
-        ] = Path("artifacts/checkpoints.sqlite3"),
+        checkpoint_db: Annotated[Path, typer.Option("--checkpoint-db")] = Path(
+            "artifacts/checkpoints.sqlite3"
+        ),
     ) -> None:
         if resume and not run_id:
             typer.echo("--resume requires --run-id", err=True)
@@ -388,12 +437,12 @@ def create_app(services: CliServices) -> typer.Typer:
     def provider_smoke(
         accept_paid_call: Annotated[bool, typer.Option("--accept-paid-call")] = False,
         config_path: Annotated[Path, typer.Option("--config")] = Path("configs/default.yaml"),
-        pricing_path: Annotated[
-            Path, typer.Option("--pricing")
-        ] = Path("configs/pricing.local.yaml"),
-        artifact_dir: Annotated[
-            Path, typer.Option("--artifact-dir")
-        ] = Path("artifacts/provider-smoke"),
+        pricing_path: Annotated[Path, typer.Option("--pricing")] = Path(
+            "configs/pricing.local.yaml"
+        ),
+        artifact_dir: Annotated[Path, typer.Option("--artifact-dir")] = Path(
+            "artifacts/provider-smoke"
+        ),
     ) -> None:
         if not accept_paid_call:
             typer.echo("provider-smoke may incur a paid call; pass --accept-paid-call", err=True)
@@ -422,8 +471,7 @@ def create_app(services: CliServices) -> typer.Typer:
             safe_payload = {
                 key: value
                 for key, value in payload.items()
-                if key
-                not in {"api_key", "headers", "request", "request_headers", "raw_request"}
+                if key not in {"api_key", "headers", "request", "request_headers", "raw_request"}
             }
             atomic_write_json(artifact_dir / f"{nonce}.json", safe_payload)
         except Exception as exc:
@@ -434,12 +482,8 @@ def create_app(services: CliServices) -> typer.Typer:
     @app.command()
     def evaluate(
         manifest: Annotated[Path, typer.Option("--manifest")] = ...,
-        stability_manifest: Annotated[
-            Path, typer.Option("--stability-manifest")
-        ] = ...,
-        config_path: Annotated[Path, typer.Option("--config")] = Path(
-            "configs/default.yaml"
-        ),
+        stability_manifest: Annotated[Path, typer.Option("--stability-manifest")] = ...,
+        config_path: Annotated[Path, typer.Option("--config")] = Path("configs/default.yaml"),
         pricing_path: Annotated[Path, typer.Option("--pricing")] = Path(
             "configs/pricing.local.yaml"
         ),
@@ -447,6 +491,9 @@ def create_app(services: CliServices) -> typer.Typer:
             "data/processed/averitec/corpora"
         ),
         activity_dir: Annotated[Path, typer.Option("--activity-dir")] = ...,
+        calibration_report: Annotated[Path, typer.Option("--calibration-report")] = Path(
+            "reports/calibration/calibration_report.json"
+        ),
         checkpoint_db: Annotated[Path, typer.Option("--checkpoint-db")] = Path(
             "artifacts/checkpoints.sqlite3"
         ),
@@ -455,13 +502,9 @@ def create_app(services: CliServices) -> typer.Typer:
         ),
         activity_id: Annotated[str, typer.Option("--activity-id")] = "gate-a",
         campaign_id: Annotated[str, typer.Option("--campaign-id")] = "gate-a-dev",
-        start_after_calibration: Annotated[
-            bool, typer.Option("--start-after-calibration")
-        ] = False,
+        start_after_calibration: Annotated[bool, typer.Option("--start-after-calibration")] = False,
         resume: Annotated[bool, typer.Option("--resume")] = False,
-        accept_paid_campaign: Annotated[
-            bool, typer.Option("--accept-paid-campaign")
-        ] = False,
+        accept_paid_campaign: Annotated[bool, typer.Option("--accept-paid-campaign")] = False,
     ) -> None:
         common = {
             "manifest": manifest,
@@ -470,6 +513,7 @@ def create_app(services: CliServices) -> typer.Typer:
             "pricing_path": pricing_path,
             "corpus_dir": corpus_dir,
             "activity_dir": activity_dir,
+            "calibration_report": calibration_report,
             "checkpoint_db": checkpoint_db,
             "run_store": run_store,
             "activity_id": activity_id,
@@ -499,12 +543,8 @@ def create_app(services: CliServices) -> typer.Typer:
 
     @app.command()
     def calibrate(
-        runtime_manifest: Annotated[
-            Path, typer.Option("--runtime-manifest")
-        ] = ...,
-        config_path: Annotated[Path, typer.Option("--config")] = Path(
-            "configs/default.yaml"
-        ),
+        runtime_manifest: Annotated[Path, typer.Option("--runtime-manifest")] = ...,
+        config_path: Annotated[Path, typer.Option("--config")] = Path("configs/default.yaml"),
         pricing_path: Annotated[Path, typer.Option("--pricing")] = Path(
             "configs/pricing.local.yaml"
         ),
@@ -525,9 +565,7 @@ def create_app(services: CliServices) -> typer.Typer:
         collect: Annotated[bool, typer.Option("--collect")] = False,
         replay: Annotated[bool, typer.Option("--replay")] = False,
         gold_manifest: Annotated[Path | None, typer.Option("--gold-manifest")] = None,
-        accept_paid_campaign: Annotated[
-            bool, typer.Option("--accept-paid-campaign")
-        ] = False,
+        accept_paid_campaign: Annotated[bool, typer.Option("--accept-paid-campaign")] = False,
     ) -> None:
         if collect == replay:
             typer.echo("choose exactly one of --collect or --replay", err=True)
@@ -570,6 +608,38 @@ def create_app(services: CliServices) -> typer.Typer:
         activity_dir: Annotated[Path, typer.Option("--activity-dir")] = ...,
         gold_manifest: Annotated[Path, typer.Option("--gold-manifest")] = ...,
         output_dir: Annotated[Path, typer.Option("--output-dir")] = ...,
+        repository_root: Annotated[Path, typer.Option("--repository-root")] = Path("."),
+        run_store: Annotated[Path, typer.Option("--run-store")] = Path(
+            "artifacts/gate-a-run-store.sqlite3"
+        ),
+        runtime_manifest: Annotated[Path, typer.Option("--runtime-manifest")] = Path(
+            "data/manifests/averitec_dev_runtime.json"
+        ),
+        calibration_runtime_manifest: Annotated[
+            Path, typer.Option("--calibration-runtime-manifest")
+        ] = Path("data/manifests/averitec_calibration_runtime.json"),
+        stability_runtime_manifest: Annotated[
+            Path, typer.Option("--stability-runtime-manifest")
+        ] = Path("data/manifests/averitec_stability_runtime.json"),
+        calibration_report: Annotated[Path, typer.Option("--calibration-report")] = Path(
+            "reports/calibration/calibration_report.json"
+        ),
+        calibrated_config: Annotated[Path, typer.Option("--calibrated-config")] = Path(
+            "configs/calibrated.yaml"
+        ),
+        corpus_preparation_receipt: Annotated[
+            Path, typer.Option("--corpus-preparation-receipt")
+        ] = Path("data/processed/averitec/preparation_receipt.json"),
+        prompt_bundle: Annotated[Path, typer.Option("--prompt-bundle")] = Path(
+            "src/evidence_route/prompts.py"
+        ),
+        pricing: Annotated[Path, typer.Option("--pricing")] = Path("configs/pricing.local.yaml"),
+        requirements_lock: Annotated[Path, typer.Option("--requirements-lock")] = Path(
+            "requirements.lock"
+        ),
+        nltk_data_root: Annotated[Path, typer.Option("--nltk-data-root")] = Path(
+            "data/external/nltk"
+        ),
         publish: Annotated[bool, typer.Option("--publish")] = False,
         readme: Annotated[Path | None, typer.Option("--readme")] = None,
     ) -> None:
@@ -581,6 +651,18 @@ def create_app(services: CliServices) -> typer.Typer:
                 activity_dir=activity_dir,
                 gold_manifest=gold_manifest,
                 output_dir=output_dir,
+                repository_root=repository_root,
+                run_store=run_store,
+                runtime_manifest=runtime_manifest,
+                calibration_runtime_manifest=calibration_runtime_manifest,
+                stability_runtime_manifest=stability_runtime_manifest,
+                calibration_report=calibration_report,
+                calibrated_config=calibrated_config,
+                corpus_preparation_receipt=corpus_preparation_receipt,
+                prompt_bundle=prompt_bundle,
+                pricing=pricing,
+                requirements_lock=requirements_lock,
+                nltk_data_root=nltk_data_root,
                 publish=publish,
                 readme=readme,
             )

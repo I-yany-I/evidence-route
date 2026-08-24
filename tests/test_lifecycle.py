@@ -16,10 +16,11 @@ from evidence_route.evaluation.lifecycle import (
     ActivityFileError,
     build_freeze_identity,
     build_initial_activity,
-    load_activity,
     link_calibration_artifact,
+    load_activity,
     mark_calibration_complete,
     persist_activity,
+    resume_activity_phase,
     transition_activity_phase,
     verify_current_freeze,
     verify_git_freeze,
@@ -70,13 +71,15 @@ def test_build_freeze_identity_hashes_all_inputs_without_secret(tmp_path: Path) 
     assert isinstance(identity, FreezeIdentity)
     assert identity.requested_alias == "relay-model"
     assert identity.seed == 20260817
-    assert identity.endpoint_config_sha256 == hashlib.sha256(
-        b'{"base_url":"https://relay.example/v1"}'
-    ).hexdigest()
+    assert (
+        identity.endpoint_config_sha256
+        == hashlib.sha256(b'{"base_url":"https://relay.example/v1"}').hexdigest()
+    )
     assert "do-not-hash-this" not in identity.model_dump_json()
-    assert identity.calibration_runtime_manifest_sha256 == hashlib.sha256(
-        files["calibration"].read_bytes()
-    ).hexdigest()
+    assert (
+        identity.calibration_runtime_manifest_sha256
+        == hashlib.sha256(files["calibration"].read_bytes()).hexdigest()
+    )
 
 
 def test_verify_current_freeze_reports_first_changed_field(tmp_path: Path) -> None:
@@ -107,6 +110,48 @@ def test_verify_current_freeze_reports_first_changed_field(tmp_path: Path) -> No
             corpus_receipt=files["receipt"],
             prompt_bundle=files["prompts"],
             config_file=files["config"],
+            pricing_file=files["pricing"],
+            requirements_lock=files["requirements"],
+            endpoint_config={"base_url": "https://relay.example/v1"},
+            requested_alias="relay-model",
+            seed=20260817,
+            manifest_freeze_git_sha="a" * 40,
+            dev_protocol_git_sha="b" * 40,
+        )
+
+
+def test_verify_current_freeze_cannot_bypass_changed_file_with_old_digest(
+    tmp_path: Path,
+) -> None:
+    files = _files(tmp_path)
+    expected = build_freeze_identity(
+        calibration_manifest=files["calibration"],
+        dev_manifest=files["dev"],
+        stability_manifest=files["stability"],
+        corpus_receipt=files["receipt"],
+        prompt_bundle=files["prompts"],
+        config_file=files["config"],
+        pricing_file=files["pricing"],
+        requirements_lock=files["requirements"],
+        endpoint_config={"base_url": "https://relay.example/v1"},
+        requested_alias="relay-model",
+        seed=20260817,
+        manifest_freeze_git_sha="a" * 40,
+        dev_protocol_git_sha="b" * 40,
+    )
+    old_config_sha = hashlib.sha256(files["config"].read_bytes()).hexdigest()
+    files["config"].write_text("routing:\n  low_confidence: 0.55\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="config_sha256"):
+        verify_current_freeze(
+            expected,
+            calibration_manifest=files["calibration"],
+            dev_manifest=files["dev"],
+            stability_manifest=files["stability"],
+            corpus_receipt=files["receipt"],
+            prompt_bundle=files["prompts"],
+            config_file=files["config"],
+            config_sha256=old_config_sha,
             pricing_file=files["pricing"],
             requirements_lock=files["requirements"],
             endpoint_config={"base_url": "https://relay.example/v1"},
@@ -170,6 +215,138 @@ def test_activity_phase_transition_preserves_model_ids_and_stop_reason() -> None
     assert activity.stop_reason.value == "usage_missing"
 
 
+def test_activity_phase_status_requires_matching_stop_reason() -> None:
+    activity = build_initial_activity(
+        activity_id="activity-1",
+        calibration_plan_sha256="a" * 64,
+        calibration_state_sha256="b" * 64,
+        case_ids=[f"{index:064x}" for index in range(32)],
+    )
+    for index, link in enumerate(activity.calibration_artifacts):
+        activity = link_calibration_artifact(
+            activity, case_id=link.case_id, artifact_sha256=f"{index + 1:064x}"
+        )
+    activity = mark_calibration_complete(activity)
+
+    with pytest.raises(ValueError, match="stop reason"):
+        transition_activity_phase(
+            activity,
+            phase="dev",
+            status=CampaignStatus.INCOMPLETE_BUDGET,
+            stop_reason=CampaignStopReason.USAGE_MISSING,
+        )
+
+
+def test_activity_rejects_dev_transition_before_calibration() -> None:
+    activity = build_initial_activity(
+        activity_id="activity-1",
+        calibration_plan_sha256="a" * 64,
+        calibration_state_sha256="b" * 64,
+        case_ids=[f"{index:064x}" for index in range(32)],
+    )
+    with pytest.raises(ValueError, match="calibration"):
+        transition_activity_phase(activity, phase="dev", status=CampaignStatus.RUNNING)
+
+
+def test_activity_rejects_dev_terminal_stop_before_calibration() -> None:
+    activity = build_initial_activity(
+        activity_id="activity-1",
+        calibration_plan_sha256="a" * 64,
+        calibration_state_sha256="b" * 64,
+        case_ids=[f"{index:064x}" for index in range(32)],
+    )
+    with pytest.raises(ValueError, match="calibration"):
+        transition_activity_phase(
+            activity,
+            phase="dev",
+            status=CampaignStatus.INCOMPLETE_BUDGET,
+            stop_reason=CampaignStopReason.BUDGET,
+        )
+
+
+@pytest.mark.parametrize(
+    ("complete_calibration", "status", "stop_reason", "expected_error"),
+    [
+        (False, CampaignStatus.RUNNING, None, "calibration"),
+        (False, CampaignStatus.INCOMPLETE_BUDGET, CampaignStopReason.BUDGET, "calibration"),
+        (True, CampaignStatus.RUNNING, None, "dev"),
+        (True, CampaignStatus.INCOMPLETE_BUDGET, CampaignStopReason.BUDGET, "dev"),
+    ],
+)
+def test_activity_rejects_stability_transition_before_predecessors_complete(
+    complete_calibration: bool,
+    status: CampaignStatus,
+    stop_reason: CampaignStopReason | None,
+    expected_error: str,
+) -> None:
+    activity = build_initial_activity(
+        activity_id="activity-1",
+        calibration_plan_sha256="a" * 64,
+        calibration_state_sha256="b" * 64,
+        case_ids=[f"{index:064x}" for index in range(32)],
+    )
+    if complete_calibration:
+        for index, link in enumerate(activity.calibration_artifacts):
+            activity = link_calibration_artifact(
+                activity,
+                case_id=link.case_id,
+                artifact_sha256=f"{index + 1:064x}",
+            )
+        activity = mark_calibration_complete(activity)
+
+    with pytest.raises(ValueError, match=expected_error):
+        transition_activity_phase(
+            activity,
+            phase="stability",
+            status=status,
+            stop_reason=stop_reason,
+        )
+
+
+def test_activity_billing_flag_requires_typed_billing_stop() -> None:
+    activity = build_initial_activity(
+        activity_id="activity-1",
+        calibration_plan_sha256="a" * 64,
+        calibration_state_sha256="b" * 64,
+        case_ids=[f"{index:064x}" for index in range(32)],
+    )
+    with pytest.raises(ValueError, match="billing"):
+        transition_activity_phase(
+            activity,
+            phase="calibration",
+            status=CampaignStatus.RUNNING,
+            billing_uncertain=True,
+        )
+    with pytest.raises(ValueError, match="billing"):
+        transition_activity_phase(
+            activity,
+            phase="calibration",
+            status=CampaignStatus.INCOMPLETE_COST_UNCERTAIN,
+            stop_reason=CampaignStopReason.BILLING_UNCERTAIN,
+            billing_uncertain=False,
+        )
+
+
+def test_resume_activity_phase_clears_only_process_interruption() -> None:
+    activity = build_initial_activity(
+        activity_id="activity-1",
+        calibration_plan_sha256="a" * 64,
+        calibration_state_sha256="b" * 64,
+        case_ids=[f"{index:064x}" for index in range(32)],
+    )
+    interrupted = transition_activity_phase(
+        activity,
+        phase="calibration",
+        status=CampaignStatus.INTERRUPTED,
+        stop_reason=CampaignStopReason.PROCESS_INTERRUPTION,
+    )
+    resumed = resume_activity_phase(interrupted, phase="calibration")
+    assert resumed.calibration_status is CampaignStatus.RUNNING
+    assert resumed.stop_reason is None
+    with pytest.raises(ValueError, match="process_interruption"):
+        resume_activity_phase(activity, phase="calibration")
+
+
 def test_verify_git_freeze_requires_clean_worktree_and_ancestor(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
@@ -179,5 +356,18 @@ def test_verify_git_freeze_requires_clean_worktree_and_ancestor(tmp_path: Path) 
     subprocess.run(["git", "commit", "-qm", "one"], cwd=tmp_path, check=True)
     base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
     _write(tmp_path / "tracked.txt", "dirty\n")
+    with pytest.raises(ValueError, match="git_worktree_clean"):
+        verify_git_freeze(tmp_path, dev_protocol_git_sha=base, manifest_freeze_git_sha=base)
+
+
+def test_verify_git_freeze_rejects_untracked_worktree_files(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    _write(tmp_path / "tracked.txt", "one\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "one"], cwd=tmp_path, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
+    _write(tmp_path / "untracked.txt", "must be audited\n")
     with pytest.raises(ValueError, match="git_worktree_clean"):
         verify_git_freeze(tmp_path, dev_protocol_git_sha=base, manifest_freeze_git_sha=base)
