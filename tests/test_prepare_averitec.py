@@ -4,10 +4,12 @@ import tracemalloc
 from pathlib import Path
 
 import pytest
+from urllib3.exceptions import ProtocolError
 
 from scripts.prepare_averitec import (
     _iter_jsonl_member,
     _parse_jsonl_member,
+    _read_member_with_retries,
     _serialised_corpus,
     build_parser,
     normalize_member,
@@ -207,6 +209,44 @@ def test_member_guard_allows_benign_directory_entries() -> None:
         )
         == b"x"
     )
+
+
+def test_remote_member_read_reopens_archive_after_protocol_error() -> None:
+    class BrokenStream:
+        def read(self, _size: int) -> bytes:
+            raise ProtocolError("connection broken")
+
+        def close(self) -> None:
+            return None
+
+    class BrokenArchive(FakeRemoteZip):
+        def open(self, name, mode="r"):
+            del name, mode
+            return BrokenStream()
+
+    first = BrokenArchive()
+    first.add("output_dev/7.json", payload=b"payload")
+    second = FakeRemoteZip()
+    second.add("output_dev/7.json", payload=b"payload")
+    reopen_calls = 0
+
+    def reopen():
+        nonlocal reopen_calls
+        reopen_calls += 1
+        return second
+
+    archive, _info, member_name, payload = _read_member_with_retries(
+        first,
+        reopen,
+        "output_dev/7.json",
+        allowed={"output_dev/7.json"},
+        max_uncompressed_bytes=100,
+    )
+
+    assert archive is second
+    assert reopen_calls == 1
+    assert member_name == "output_dev/7.json"
+    assert payload == b"payload"
 
 
 def test_stability_selection_uses_selected_dev_ids_only() -> None:

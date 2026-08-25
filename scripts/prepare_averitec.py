@@ -392,6 +392,58 @@ def _stream_selected_member_with_info(
     return info, normalised, payload
 
 
+def _is_transient_remote_read_error(exc: Exception) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    urllib3_names = {
+        "ConnectTimeoutError",
+        "NewConnectionError",
+        "ProtocolError",
+        "ReadTimeoutError",
+    }
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (ConnectionError, TimeoutError)):
+            return True
+        error_type = type(current)
+        if error_type.__module__.startswith("urllib3.") and error_type.__name__ in urllib3_names:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _read_member_with_retries(
+    archive: object,
+    reopen_archive: Callable[[], object],
+    member_name: str,
+    *,
+    allowed: set[str],
+    max_uncompressed_bytes: int,
+    max_attempts: int = 3,
+) -> tuple[object, object, str, bytes]:
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be positive")
+    current: object | None = archive
+    for attempt in range(max_attempts):
+        try:
+            if current is None:
+                current = reopen_archive()
+            info, normalised, payload = _stream_selected_member_with_info(
+                current,
+                member_name,
+                allowed=allowed,
+                max_uncompressed_bytes=max_uncompressed_bytes,
+            )
+            return current, info, normalised, payload
+        except Exception as exc:
+            if current is not None:
+                _close_context(current)
+                current = None
+            if attempt + 1 == max_attempts or not _is_transient_remote_read_error(exc):
+                raise
+    raise AssertionError("unreachable remote member retry state")
+
+
 def stream_selected_member(
     archive: object,
     member_name: str,
@@ -841,8 +893,14 @@ def prepare_dataset(
             try:
                 allowed = {member_path for _split, _id, member_path in members}
                 for split, original_id, member_path in members:
-                    info, normalised_member, payload = _stream_selected_member_with_info(
+                    archive, info, normalised_member, payload = _read_member_with_retries(
                         archive,
+                        lambda archive_path=archive_path: _archive_context(
+                            spec,
+                            archive_path,
+                            timeout_s=remote_timeout_s,
+                            archive_factory=archive_factory,
+                        ),
                         member_path,
                         allowed=allowed,
                         max_uncompressed_bytes=max_member_uncompressed_bytes,
