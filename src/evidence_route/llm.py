@@ -84,17 +84,37 @@ class StructuredLLM:
         max_output_tokens: int,
         allow_repair: bool = True,
     ) -> StructuredResult[T]:
+        effective_messages = self._with_schema_instruction(messages, schema)
         return await self._invoke_attempt(
             run_id=run_id,
             node=node,
             task_id=task_id,
-            messages=messages,
+            messages=effective_messages,
             schema=schema,
             max_input_tokens=max_input_tokens,
             max_output_tokens=max_output_tokens,
             logical_attempt=0,
             allow_repair=allow_repair,
         )
+
+    def _with_schema_instruction(
+        self, messages: list[dict[str, str]], schema: type[BaseModel]
+    ) -> list[dict[str, str]]:
+        if self.settings.structured_mode != "json_object":
+            return messages
+        schema_json = json.dumps(
+            schema.model_json_schema(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        return [
+            *messages,
+            {
+                "role": "system",
+                "content": (
+                    "Return only one JSON object matching this required JSON schema exactly: "
+                    f"{schema_json}"
+                ),
+            },
+        ]
 
     async def _invoke_attempt(
         self,

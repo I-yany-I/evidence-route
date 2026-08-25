@@ -26,6 +26,16 @@ class FakeTransport:
         return response
 
 
+class RecordingTransport(FakeTransport):
+    def __init__(self, responses: list[RawCompletion]) -> None:
+        super().__init__(responses)
+        self.requests: list[dict[str, object]] = []
+
+    async def create(self, **request: object) -> RawCompletion:
+        self.requests.append(request)
+        return await super().create(**request)
+
+
 class AmbiguousAfterSendTransport:
     def __init__(self) -> None:
         self.calls = 0
@@ -74,6 +84,27 @@ async def test_invalid_json_is_repaired_once(tmp_path) -> None:
     )
     assert result.value.route == "single"
     assert transport.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_json_object_mode_includes_exact_schema_in_messages(tmp_path) -> None:
+    transport = RecordingTransport([raw('{"route":"single"}')])
+    llm = make_llm(tmp_path, transport)
+
+    await llm.invoke(
+        run_id="run-schema",
+        node="router",
+        task_id="root",
+        messages=[{"role": "user", "content": "route this"}],
+        schema=RoutePayload,
+        max_input_tokens=1800,
+        max_output_tokens=250,
+    )
+
+    messages = transport.requests[0]["messages"]
+    assert isinstance(messages, list)
+    assert '"route"' in messages[-1]["content"]
+    assert "required JSON schema" in messages[-1]["content"]
 
 
 @pytest.mark.asyncio
