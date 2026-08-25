@@ -159,6 +159,18 @@ def test_member_normalization_rejects_local_urls(url: str) -> None:
         list(normalize_member("dev", 1, [{"url": url, "url2text": ["text"]}]))
 
 
+def test_member_normalization_repairs_scheme_less_public_domain() -> None:
+    records = list(
+        normalize_member(
+            "dev",
+            1,
+            [{"url": "abc.net.au/news/story", "url2text": ["text"]}],
+        )
+    )
+
+    assert records[0]["source_url"] == "https://abc.net.au/news/story"
+
+
 def test_member_guard_rejects_duplicate_and_traversal_entries() -> None:
     duplicate = FakeRemoteZip()
     duplicate.add("output_dev/7.json", payload=b'{"url":"https://example.org","url2text":["x"]}\n')

@@ -222,6 +222,11 @@ def _public_http_url(value: object) -> tuple[str, str]:
         raise ValueError("evidence source URL must be a non-empty string")
     url = value.strip()
     parsed = urlparse(url)
+    if not parsed.scheme and " " not in url and "\t" not in url and "\n" not in url:
+        host_candidate = url.split("/", 1)[0].split(":", 1)[0]
+        if "." in host_candidate and re.fullmatch(r"[A-Za-z0-9.-]+", host_candidate):
+            url = f"https://{url}"
+            parsed = urlparse(url)
     if parsed.scheme.lower() not in {"http", "https"}:
         raise ValueError(f"unsupported evidence URL scheme: {url!r}")
     if parsed.username is not None or parsed.password is not None:
