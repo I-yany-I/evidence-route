@@ -16,6 +16,7 @@ from typing import Any
 from evidence_route.artifacts import SQLiteRunStore
 from evidence_route.budget import PriceConfig
 from evidence_route.config import AppConfig, load_app_config, stable_hash
+from evidence_route.contracts import Usage
 from evidence_route.evaluation.activity import (
     ActivityRecord,
     CampaignPlan,
@@ -37,6 +38,14 @@ from evidence_route.evaluation.calibration import (
     load_calibration_cases,
     load_calibration_plan,
     load_calibration_state,
+)
+from evidence_route.evaluation.experiment import (
+    create_experiment_identity,
+    load_experiment_identity,
+    materialize_calibration_assets,
+    validate_experiment_target,
+    validate_parent_baseline,
+    verify_repeat_zero_reuse,
 )
 from evidence_route.evaluation.lifecycle import (
     build_freeze_identity,
@@ -206,6 +215,7 @@ class ProductionCampaignService:
         pricing_path: Path,
         calibration_report: Path,
         replay_metadata: Path,
+        allow_prompt_drift: bool = False,
     ) -> None:
         frozen = {
             "manifest_freeze_git_sha": calibration_plan.manifest_freeze_git_sha,
@@ -232,6 +242,8 @@ class ProductionCampaignService:
             "seed": current_freeze.seed,
         }
         for field, expected in frozen.items():
+            if allow_prompt_drift and field == "prompt_bundle_sha256":
+                continue
             if actual[field] != expected:
                 raise ValueError(f"calibration freeze differs in {field}")
         cap_micro_cny = int(app_config.budget.estimated_cost_cap_cny * 1_000_000)
@@ -394,33 +406,69 @@ class ProductionCampaignService:
         *,
         calibration_cases: Sequence[CalibrationRuntimeCase],
         state: CampaignState,
+        calibration_run_store: SQLiteRunStore | None = None,
     ) -> RunSummary:
-        run_ids = [
+        calibration_run_ids = [
             run_id
             for case in calibration_cases
             for run_id in (case.router_run_id, case.single_run_id, case.multi_run_id)
         ]
-        # Include every scheduled campaign run, including an interrupted item with no artifact,
-        # while excluding unrelated rows that may share the activity ledger.
-        run_ids.extend(item.run_id for item in state.items)
-        run_ids = list(dict.fromkeys(run_ids))
-        ledger = run_store.summarize_runs(run_ids)
+        campaign_run_ids = list(dict.fromkeys(item.run_id for item in state.items))
+        calibration_ledger = (calibration_run_store or run_store).summarize_runs(
+            list(dict.fromkeys(calibration_run_ids))
+        )
+        campaign_ledger = run_store.summarize_runs(campaign_run_ids)
+        ledgers = [calibration_ledger, campaign_ledger]
+        run_ids = list(
+            dict.fromkeys(
+                [run_id for case in calibration_cases for run_id in (
+                    case.router_run_id,
+                    case.single_run_id,
+                    case.multi_run_id,
+                )]
+                + campaign_run_ids
+            )
+        )
+        call_ids = list(
+            dict.fromkeys(call_id for ledger in ledgers for call_id in ledger.call_ids)
+        )
+        usage_complete = all(ledger.usage.complete for ledger in ledgers)
+        actual_exact = all(ledger.actual_cost_micro_cny is not None for ledger in ledgers)
+        aliases = list(
+            dict.fromkeys(alias for ledger in ledgers for alias in ledger.requested_aliases)
+        )
+        model_ids = list(
+            dict.fromkeys(model for ledger in ledgers for model in ledger.response_model_ids_raw)
+        )
         return RunSummary(
             run_ids=run_ids,
-            call_ids=ledger.call_ids,
-            usage=ledger.usage,
-            usage_sources=ledger.usage_sources,
-            actual_cost_micro_cny=ledger.actual_cost_micro_cny,
-            known_actual_cost_micro_cny=ledger.known_actual_cost_micro_cny,
-            committed_cost_micro_cny=ledger.committed_cost_micro_cny,
-            cost_is_lower_bound=ledger.cost_is_lower_bound,
-            fresh_call_count=ledger.fresh_call_count,
-            cache_hit_count=ledger.cache_hit_count,
-            transport_attempts=ledger.transport_attempts,
-            requested_aliases=ledger.requested_aliases,
-            response_model_ids_raw=ledger.response_model_ids_raw,
+            call_ids=call_ids,
+            usage=Usage(
+                input_tokens=sum(ledger.usage.input_tokens for ledger in ledgers),
+                output_tokens=sum(ledger.usage.output_tokens for ledger in ledgers),
+                total_tokens=sum(ledger.usage.total_tokens for ledger in ledgers),
+                complete=usage_complete,
+            ),
+            usage_sources=[
+                source for ledger in ledgers for source in ledger.usage_sources
+            ],
+            actual_cost_micro_cny=(
+                sum(ledger.actual_cost_micro_cny or 0 for ledger in ledgers)
+                if actual_exact
+                else None
+            ),
+            known_actual_cost_micro_cny=sum(
+                ledger.known_actual_cost_micro_cny for ledger in ledgers
+            ),
+            committed_cost_micro_cny=sum(ledger.committed_cost_micro_cny for ledger in ledgers),
+            cost_is_lower_bound=not actual_exact,
+            fresh_call_count=sum(ledger.fresh_call_count for ledger in ledgers),
+            cache_hit_count=sum(ledger.cache_hit_count for ledger in ledgers),
+            transport_attempts=sum(ledger.transport_attempts for ledger in ledgers),
+            requested_aliases=aliases,
+            response_model_ids_raw=model_ids,
             identity_verified=False,
-            billing_uncertain=ledger.billing_uncertain,
+            billing_uncertain=any(ledger.billing_uncertain for ledger in ledgers),
         )
 
     @staticmethod
@@ -463,6 +511,20 @@ class ProductionCampaignService:
             },
             deep=True,
         )
+        if state.stop_reason is CampaignStopReason.USER_PAUSED:
+            pending = next(
+                (
+                    work
+                    for work, item in zip(plan.schedule, state.items, strict=True)
+                    if item.status is WorkStatus.PENDING
+                ),
+                None,
+            )
+            if pending is not None:
+                updated = updated.model_copy(
+                    update={f"{pending.phase}_status": CampaignStatus.PAUSED},
+                    deep=True,
+                )
         updated.status = derive_activity_status(
             updated.calibration_status,
             updated.dev_status,
@@ -484,6 +546,59 @@ class ProductionCampaignService:
         activity_dir = Path(kwargs["activity_dir"])
         activity_id = str(kwargs["activity_id"])
         campaign_id = str(kwargs["campaign_id"])
+        parent_activity_value = kwargs.get("parent_activity")
+        parent_report_value = kwargs.get("parent_report")
+        experiment_dir_value = kwargs.get("experiment_dir")
+        experiment_mode = any(
+            value is not None
+            for value in (parent_activity_value, parent_report_value, experiment_dir_value)
+        )
+        if experiment_mode and not all(
+            value is not None
+            for value in (parent_activity_value, parent_report_value, experiment_dir_value)
+        ):
+            raise ValueError(
+                "experiment mode requires --parent-activity, --parent-report, and "
+                "--experiment-dir"
+            )
+        parent_activity = str(parent_activity_value) if parent_activity_value is not None else None
+        parent_report = Path(parent_report_value) if parent_report_value is not None else None
+        experiment_dir = Path(experiment_dir_value) if experiment_dir_value is not None else None
+        if experiment_mode:
+            assert (
+                parent_activity is not None
+                and parent_report is not None
+                and experiment_dir is not None
+            )
+            if parent_activity == activity_id:
+                raise ValueError("experiment activity must be distinct from parent activity")
+            validate_experiment_target(parent_report, experiment_dir)
+        parent_activity_dir: Path | None = None
+        parent_run_store_path: Path | None = None
+        if experiment_mode:
+            assert parent_activity is not None
+            parent_activity_dir = (
+                self.repository_root / "artifacts" / "evaluation" / parent_activity
+            )
+            parent_run_store_path = (
+                self.repository_root / "artifacts" / parent_activity / "run-store.sqlite3"
+            )
+            if not parent_activity_dir.is_dir():
+                raise ValueError(f"parent activity directory is missing: {parent_activity_dir}")
+            if not parent_run_store_path.is_file():
+                raise ValueError(f"parent run store is missing: {parent_run_store_path}")
+            if mode == "start_after_calibration":
+                materialize_calibration_assets(
+                    parent_activity_dir=parent_activity_dir,
+                    experiment_activity_dir=activity_dir,
+                    experiment_activity_id=activity_id,
+                    parent_activity_id=parent_activity,
+                )
+        max_items = kwargs.get("max_items")
+        if max_items is not None and (
+            not isinstance(max_items, int) or isinstance(max_items, bool) or max_items <= 0
+        ):
+            raise ValueError("max_items must be a positive integer")
         checkpoint_db = Path(kwargs["checkpoint_db"])
         run_store_path = Path(kwargs["run_store"])
         report_value = kwargs.get("calibration_report")
@@ -526,9 +641,17 @@ class ProductionCampaignService:
         replay_metadata_path = activity_dir / "calibration-replay.json"
         _require_file(replay_metadata_path, "calibration replay metadata")
         activity = load_activity(activity_path)
-        if activity.activity_id != activity_id or calibration_plan.activity_id != activity_id:
+        expected_calibration_activity = parent_activity if experiment_mode else activity_id
+        if (
+            activity.activity_id != activity_id
+            or calibration_plan.activity_id != expected_calibration_activity
+        ):
             raise ValueError("activity ID differs from calibration activity")
-        resumable_stop_reasons = {None, CampaignStopReason.PROCESS_INTERRUPTION}
+        resumable_stop_reasons = {
+            None,
+            CampaignStopReason.PROCESS_INTERRUPTION,
+            CampaignStopReason.USER_PAUSED,
+        }
         if (
             activity.calibration_status is not CampaignStatus.COMPLETE
             or activity.billing_uncertain
@@ -536,6 +659,33 @@ class ProductionCampaignService:
             or (mode == "resume" and activity.stop_reason not in resumable_stop_reasons)
         ):
             raise ValueError("calibration activity is not closed")
+
+        experiment_identity = None
+        if experiment_mode:
+            assert (
+                parent_activity is not None
+                and parent_report is not None
+                and experiment_dir is not None
+            )
+            if mode == "resume":
+                experiment_identity = load_experiment_identity(experiment_dir)
+                if experiment_identity.activity_id != activity_id:
+                    raise ValueError(
+                        "experiment identity activity ID differs from requested activity"
+                    )
+                if experiment_identity.campaign_id != campaign_id:
+                    raise ValueError(
+                        "experiment identity campaign ID differs from requested campaign"
+                    )
+                validate_parent_baseline(
+                    experiment_identity,
+                    parent_report=parent_report,
+                    parent_manifest=manifest_path,
+                    pricing=pricing_path,
+                    config=config_path,
+                    prompt=self.repository_root / "src" / "evidence_route" / "prompts.py",
+                    stability_manifest=stability_path,
+                )
 
         current_freeze = self._build_freeze(
             calibration_plan=calibration_plan,
@@ -554,6 +704,7 @@ class ProductionCampaignService:
             pricing_path=pricing_path,
             calibration_report=calibration_report,
             replay_metadata=replay_metadata_path,
+            allow_prompt_drift=experiment_mode,
         )
         bounds = estimate_call_bounds(
             compute_gate_a_call_profile(),
@@ -562,15 +713,34 @@ class ProductionCampaignService:
             reserve_ratio=app_config.budget.reserve_ratio,
         )
         cap_micro_cny = int(app_config.budget.estimated_cost_cap_cny * 1_000_000)
-        _require_file(run_store_path, "shared run store")
-        # Validate the shared ledger without creating or repairing tables before the campaign
-        # plan is accepted.  The writable handle is opened only after this read-only audit.
-        SQLiteRunStore.open_existing(
-            run_store_path,
-            activity_id=activity_id,
-            cap_cny=app_config.budget.estimated_cost_cap_cny,
-            pricing=pricing,
-        )
+        calibration_run_store: SQLiteRunStore | None = None
+        if experiment_mode:
+            assert parent_activity is not None and parent_run_store_path is not None
+            SQLiteRunStore.open_existing(
+                parent_run_store_path,
+                activity_id=parent_activity,
+                cap_cny=app_config.budget.estimated_cost_cap_cny,
+                pricing=pricing,
+            )
+            calibration_run_store = SQLiteRunStore.open_existing(
+                parent_run_store_path,
+                activity_id=parent_activity,
+                cap_cny=app_config.budget.estimated_cost_cap_cny,
+                pricing=pricing,
+            )
+        elif mode == "resume":
+            _require_file(run_store_path, "shared run store")
+            SQLiteRunStore.open_existing(
+                run_store_path,
+                activity_id=activity_id,
+                cap_cny=app_config.budget.estimated_cost_cap_cny,
+                pricing=pricing,
+            )
+        if experiment_mode and parent_run_store_path is not None:
+            if run_store_path.resolve() == parent_run_store_path.resolve():
+                raise ValueError("experiment run store must be distinct from parent run store")
+        if not experiment_mode:
+            _require_file(run_store_path, "shared run store")
         run_store = SQLiteRunStore(
             run_store_path,
             activity_id=activity_id,
@@ -578,13 +748,36 @@ class ProductionCampaignService:
             pricing=pricing,
         )
         calibration_cases, calibration_model_ids = self._verify_calibration_ledger(
-            activity_dir=activity_dir,
+            activity_dir=parent_activity_dir or activity_dir,
             calibration_plan=calibration_plan,
             calibration_state=calibration_state,
-            activity=activity,
-            run_store=run_store,
+            activity=(
+                load_activity((parent_activity_dir or activity_dir) / "activity.json")
+                if experiment_mode
+                else activity
+            ),
+            run_store=calibration_run_store or run_store,
             pricing=pricing,
         )
+        baseline_artifact_paths: dict[str, Path] = {}
+        parent_state: CampaignState | None = None
+        if experiment_mode:
+            assert parent_activity_dir is not None
+            parent_plan = CampaignPlan.model_validate_json(
+                (parent_activity_dir / "plan.json").read_text(encoding="utf-8")
+            )
+            parent_state = CampaignState.model_validate_json(
+                (parent_activity_dir / "campaign.json").read_text(encoding="utf-8")
+            )
+            for link in parent_plan.stability_repeat_zero_links:
+                artifact_path = (
+                    parent_activity_dir / "artifacts" / f"{link.dev_adaptive_run_id}.json"
+                )
+                if link.claim_id not in parent_state.stability_repeat_zero_artifact_sha256s:
+                    raise ValueError("parent activity is missing a stability repeat-zero link")
+                baseline_artifact_paths[link.claim_id] = artifact_path
+            if experiment_identity is not None:
+                verify_repeat_zero_reuse(experiment_identity, baseline_artifact_paths)
 
         freeze_kwargs = {
             "calibration_manifest": calibration_plan.runtime_manifest_sha256,
@@ -615,6 +808,38 @@ class ProductionCampaignService:
             )
             self._validate_production_plan(plan)
             verify_current_freeze(current_freeze, **freeze_kwargs)
+            if experiment_mode:
+                assert (
+                    parent_activity is not None
+                    and parent_report is not None
+                    and experiment_dir is not None
+                )
+                experiment_identity = create_experiment_identity(
+                    experiment_id=activity_id,
+                    activity_id=activity_id,
+                    campaign_id=campaign_id,
+                    parent_activity_id=parent_activity,
+                    parent_report=parent_report,
+                    parent_manifest=manifest_path,
+                    pricing=pricing_path,
+                    config=config_path,
+                    prompt=self.repository_root / "src" / "evidence_route" / "prompts.py",
+                    stability_manifest=stability_path,
+                    repeat_schedule={
+                        link.claim_id: [0, 1, 2]
+                        for link in plan.stability_repeat_zero_links
+                    },
+                    requested_alias=app_config.llm.requested_alias,
+                    response_model_id=calibration_model_ids[0],
+                    identity_verified=False,
+                    output_dir=experiment_dir,
+                    repeat_zero_artifact_sha256s=(
+                        parent_state.stability_repeat_zero_artifact_sha256s
+                        if parent_state is not None
+                        else None
+                    ),
+                )
+                verify_repeat_zero_reuse(experiment_identity, baseline_artifact_paths)
         else:
             if not campaign_plan_path.is_file() or not campaign_state_path.is_file():
                 raise ValueError("--resume requires an existing campaign")
@@ -665,15 +890,23 @@ class ProductionCampaignService:
                     stability_status = CampaignStatus.RUNNING
                 else:
                     dev_status = CampaignStatus.RUNNING
-            if current.stop_reason is CampaignStopReason.PROCESS_INTERRUPTION:
+            if current.stop_reason in {
+                CampaignStopReason.PROCESS_INTERRUPTION,
+                CampaignStopReason.USER_PAUSED,
+            }:
                 interrupted_phases = [
                     phase
                     for phase in ("dev", "stability")
-                    if getattr(current, f"{phase}_status") is CampaignStatus.INTERRUPTED
+                    if getattr(current, f"{phase}_status")
+                    in {CampaignStatus.INTERRUPTED, CampaignStatus.PAUSED}
                 ]
                 if len(interrupted_phases) != 1:
-                    raise ValueError("process interruption requires exactly one interrupted phase")
+                    raise ValueError("resumable stop requires exactly one interrupted phase")
                 current = resume_activity_phase(current, phase=interrupted_phases[0])
+                if interrupted_phases[0] == "dev":
+                    dev_status = CampaignStatus.RUNNING
+                else:
+                    stability_status = CampaignStatus.RUNNING
             current = current.model_copy(
                 update={
                     "dev_status": dev_status,
@@ -708,9 +941,16 @@ class ProductionCampaignService:
         state: CampaignState | None = None
         try:
             if mode == "start_after_calibration":
-                state = await runner.run(plan, initial_model_ids=calibration_model_ids)
+                state = await runner.run(
+                    plan,
+                    initial_model_ids=calibration_model_ids,
+                    max_items=max_items,
+                )
             else:
-                state = await runner.resume(expected_identity=current_freeze)
+                state = await runner.resume(
+                    expected_identity=current_freeze,
+                    max_items=max_items,
+                )
             return {
                 "status": state.status.value,
                 "activity_id": activity_id,
@@ -743,6 +983,7 @@ class ProductionCampaignService:
                     run_store,
                     calibration_cases=calibration_cases,
                     state=persisted_state,
+                    calibration_run_store=calibration_run_store,
                 )
                 activity = self._update_activity(
                     activity_path,

@@ -201,6 +201,52 @@ def test_collect_freezes_before_first_transport_and_closes_all_cases(
     assert len({item["case_id"] for item in activity["calibration_artifacts"]}) == 32
 
 
+def test_collect_pauses_after_case_limit_and_resumes_completed_cases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _write_runtime_inputs(tmp_path)
+    activity_dir = tmp_path / "activity"
+    transport = _Transport(activity_dir)
+    monkeypatch.setenv("EVIDENCE_ROUTE_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("EVIDENCE_ROUTE_API_KEY", "fixture-key")
+    monkeypatch.setenv("EVIDENCE_ROUTE_MODEL", "fixture-model")
+    kwargs = _collect_kwargs(paths, tmp_path, activity_dir)
+
+    paused = ProductionServices(transport_factory=lambda settings: transport).calibrate_collect(
+        **kwargs, max_cases=1
+    )
+
+    assert paused["status"] == CampaignStatus.PAUSED.value
+    assert paused["completed_cases"] == 1
+    assert paused["paused"] is True
+    assert transport.calls == 7
+
+    resumed = ProductionServices(transport_factory=lambda settings: transport).calibrate_collect(
+        **{**kwargs, "resume": True}, max_cases=40
+    )
+
+    assert resumed["status"] == "complete"
+    assert resumed["completed_cases"] == 32
+    assert transport.calls == 32 * 7
+
+
+def test_collect_rejects_non_positive_case_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _write_runtime_inputs(tmp_path)
+    kwargs = _collect_kwargs(paths, tmp_path, tmp_path / "activity")
+    monkeypatch.setenv("EVIDENCE_ROUTE_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("EVIDENCE_ROUTE_API_KEY", "fixture-key")
+    monkeypatch.setenv("EVIDENCE_ROUTE_MODEL", "fixture-model")
+
+    with pytest.raises(ValueError, match="max_cases"):
+        ProductionServices(
+            transport_factory=lambda settings: _Transport(kwargs["activity_dir"])
+        ).calibrate_collect(
+            **kwargs, max_cases=0
+        )
+
+
 def test_collect_seals_request_fingerprint_for_every_saved_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

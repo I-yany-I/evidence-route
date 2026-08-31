@@ -513,6 +513,9 @@ def create_app(services: CliServices) -> typer.Typer:
         resume: Annotated[bool, typer.Option("--resume")] = False,
         accept_paid_campaign: Annotated[bool, typer.Option("--accept-paid-campaign")] = False,
         max_items: Annotated[int, typer.Option("--max-items")] = 10,
+        parent_activity: Annotated[str | None, typer.Option("--parent-activity")] = None,
+        parent_report: Annotated[Path | None, typer.Option("--parent-report")] = None,
+        experiment_dir: Annotated[Path | None, typer.Option("--experiment-dir")] = None,
     ) -> None:
         common = {
             "manifest": manifest,
@@ -527,6 +530,9 @@ def create_app(services: CliServices) -> typer.Typer:
             "activity_id": activity_id,
             "campaign_id": campaign_id,
             "max_items": max_items,
+            "parent_activity": parent_activity,
+            "parent_report": parent_report,
+            "experiment_dir": experiment_dir,
         }
         try:
             if not accept_paid_campaign:

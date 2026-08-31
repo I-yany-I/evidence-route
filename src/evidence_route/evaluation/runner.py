@@ -277,6 +277,13 @@ class CampaignRunner:
     def _write_state(self, state: CampaignState) -> None:
         atomic_write_json(self.state_path, state.model_dump(mode="json"))
 
+    @staticmethod
+    def _validate_max_items(max_items: int | None) -> None:
+        if max_items is not None and (
+            not isinstance(max_items, int) or isinstance(max_items, bool) or max_items <= 0
+        ):
+            raise ValueError("max_items must be a positive integer")
+
     def _verify_state_items(self, plan: CampaignPlan, state: CampaignState) -> None:
         if len(state.items) != len(plan.schedule):
             raise ValueError("campaign state items do not match persisted plan length")
@@ -481,7 +488,9 @@ class CampaignRunner:
         plan: CampaignPlan,
         *,
         initial_model_ids: Iterable[str] = (),
+        max_items: int | None = None,
     ) -> CampaignState:
+        self._validate_max_items(max_items)
         plan_exists = self.plan_path.exists()
         state_exists = self.state_path.exists()
         if plan_exists != state_exists:
@@ -496,9 +505,15 @@ class CampaignRunner:
         self._write_plan(plan)
         state = self._new_state(plan, initial_model_ids=initial_model_ids)
         self._write_state(state)
-        return await self._execute(plan, state)
+        return await self._execute(plan, state, max_items=max_items)
 
-    async def resume(self, *, expected_identity: FreezeIdentity | None = None) -> CampaignState:
+    async def resume(
+        self,
+        *,
+        expected_identity: FreezeIdentity | None = None,
+        max_items: int | None = None,
+    ) -> CampaignState:
+        self._validate_max_items(max_items)
         plan = self._load_plan()
         if plan.call_bounds.startup_required_micro_cny > plan.cap_micro_cny:
             raise BudgetExceeded("startup worst-case reservation exceeds campaign cap")
@@ -515,7 +530,8 @@ class CampaignRunner:
         )
         if (
             persisted_reason is not None
-            and persisted_reason is not CampaignStopReason.PROCESS_INTERRUPTION
+            and persisted_reason
+            not in {CampaignStopReason.PROCESS_INTERRUPTION, CampaignStopReason.USER_PAUSED}
         ):
             normalized_status = derive_campaign_status(state.items, stop_reason=persisted_reason)
             normalized_billing = persisted_reason is CampaignStopReason.BILLING_UNCERTAIN
@@ -544,7 +560,15 @@ class CampaignRunner:
             running_item.stop_reason = CampaignStopReason.PROCESS_INTERRUPTION
             running_item.interrupted_at = running_item.interrupted_at or _now()
             changed = True
-        elif state.stop_reason is CampaignStopReason.PROCESS_INTERRUPTION:
+        elif state.stop_reason in {
+            CampaignStopReason.PROCESS_INTERRUPTION,
+            CampaignStopReason.USER_PAUSED,
+        }:
+            if state.stop_reason is CampaignStopReason.USER_PAUSED:
+                state.stop_reason = None
+                state.status = CampaignStatus.RUNNING
+                self._write_state(state)
+                return await self._execute(plan, state, max_items=max_items)
             resumable = [
                 item
                 for item in state.items
@@ -611,7 +635,7 @@ class CampaignRunner:
             state.stop_reason = None
             state.status = CampaignStatus.RUNNING
             self._write_state(state)
-        return await self._execute(plan, state)
+        return await self._execute(plan, state, max_items=max_items)
 
     async def _invoke(self, work: CampaignWorkItem) -> RunArtifact:
         result = self.executor(work)
@@ -781,9 +805,16 @@ class CampaignRunner:
         self._write_state(state)
         return state
 
-    async def _execute(self, plan: CampaignPlan, state: CampaignState) -> CampaignState:
+    async def _execute(
+        self,
+        plan: CampaignPlan,
+        state: CampaignState,
+        *,
+        max_items: int | None = None,
+    ) -> CampaignState:
         state.status = CampaignStatus.RUNNING
         self._write_state(state)
+        executed_items = 0
         baseline = set(state.observed_response_model_ids_raw)
         linked_claims = {link.claim_id for link in plan.stability_repeat_zero_links}
         stability_verified = False
@@ -901,6 +932,14 @@ class CampaignRunner:
             state.status = derive_campaign_status(state.items)
             self._refresh_summary(state)
             self._write_state(state)
+            executed_items += 1
+            if max_items is not None and executed_items >= max_items:
+                remaining = any(item.status is WorkStatus.PENDING for item in state.items)
+                if remaining:
+                    state.stop_reason = CampaignStopReason.USER_PAUSED
+                    state.status = CampaignStatus.PAUSED
+                    self._write_state(state)
+                    return state
         state.status = derive_campaign_status(state.items)
         self._refresh_summary(state)
         self._write_state(state)

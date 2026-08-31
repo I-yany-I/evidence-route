@@ -184,6 +184,18 @@ def test_result_status_mapping_and_campaign_completion() -> None:
     )
 
 
+def test_user_paused_campaign_is_not_complete() -> None:
+    item = CampaignItemState(
+        run_id=derive_run_id("campaign", "dev", "claim", "adaptive", 0),
+        status=WorkStatus.PENDING,
+        artifact_relpath="artifact.json",
+    )
+    assert (
+        derive_campaign_status([item], stop_reason=CampaignStopReason.USER_PAUSED)
+        is CampaignStatus.PAUSED
+    )
+
+
 def test_safety_stop_reason_precedence() -> None:
     items = [
         CampaignItemState(

@@ -10,6 +10,7 @@ from evidence_route.evaluation.stability import (
     StabilityCategory,
     StabilityClaimDiagnostic,
     StabilityDiagnosticSummary,
+    build_stability_comparison,
     build_stability_diagnostics,
     canonicalize_citation_url,
     citation_is_valid,
@@ -290,6 +291,32 @@ def test_missing_repeat_is_visible_and_primary_incomplete() -> None:
     assert record.repeats[1].valid is False
     assert record.primary_category is StabilityCategory.INCOMPLETE_OR_FAILED
     assert record.categories == [StabilityCategory.INCOMPLETE_OR_FAILED]
+
+
+def test_stability_comparison_reports_improved_claims_and_category_deltas() -> None:
+    artifact = _artifact()
+    baseline = _diagnostics({"claim": {0: artifact, 1: None, 2: artifact}})
+    experiment = _diagnostics({"claim": {0: artifact, 1: artifact, 2: artifact}})
+
+    comparison = build_stability_comparison(baseline, experiment)
+
+    assert comparison.improved_claims == ["claim"]
+    assert comparison.regressed_claims == []
+    assert comparison.unchanged_claims == []
+    assert comparison.baseline_consistent_claim_count == 0
+    assert comparison.experiment_consistent_claim_count == 1
+    assert comparison.baseline_completion_rate == pytest.approx(2 / 3)
+    assert comparison.experiment_completion_rate == 1.0
+    assert comparison.baseline_diagnostic_sha256 != comparison.experiment_diagnostic_sha256
+
+
+def test_stability_comparison_rejects_different_claim_sets() -> None:
+    artifact = _artifact()
+    baseline = _diagnostics({"claim-a": {0: artifact, 1: artifact, 2: artifact}})
+    experiment = _diagnostics({"claim-b": {0: artifact, 1: artifact, 2: artifact}})
+
+    with pytest.raises(ValueError, match="claim sets"):
+        build_stability_comparison(baseline, experiment)
 
 
 def test_failed_and_partial_incomplete_repeats_are_visible_and_incomplete() -> None:

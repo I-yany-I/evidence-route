@@ -258,6 +258,13 @@ class ProductionCalibrationCollector:
         run_store_path = Path(kwargs["run_store"])
         activity_id = str(kwargs["activity_id"])
         resume = bool(kwargs.get("resume", False))
+        max_cases = kwargs.get("max_cases")
+        if max_cases is not None and (
+            not isinstance(max_cases, int)
+            or isinstance(max_cases, bool)
+            or max_cases <= 0
+        ):
+            raise ValueError("max_cases must be a positive integer")
         activity_dir.mkdir(parents=True, exist_ok=True)
 
         plan_path = activity_dir / "calibration-plan.json"
@@ -375,7 +382,10 @@ class ProductionCalibrationCollector:
             state = reconcile_calibration_state(activity_dir, plan, state, state_path=state_path)
             _verify_resume_ledger(activity_dir, plan, state, run_store)
             activity = self._link_reconciled_cases(activity, plan, state)
-            if activity.stop_reason is CampaignStopReason.PROCESS_INTERRUPTION:
+            if activity.stop_reason in {
+                CampaignStopReason.PROCESS_INTERRUPTION,
+                CampaignStopReason.USER_PAUSED,
+            }:
                 activity = resume_activity_phase(activity, phase="calibration")
             activity = _sync_activity_journal_hashes(
                 activity,
@@ -430,6 +440,7 @@ class ProductionCalibrationCollector:
         single_executor = self.executor_factory(**executor_kwargs)
         multi_executor = self.executor_factory(**executor_kwargs)
 
+        completed_this_invocation = 0
         for work, state_item in zip(plan.items, state.items, strict=True):
             if state_item.status is CalibrationItemStatus.COMPLETE:
                 continue
@@ -446,7 +457,6 @@ class ProductionCalibrationCollector:
                     update={"calibration_state_sha256": sha256_file(state_path)}, deep=True
                 )
                 persist_activity(activity_path, activity)
-
                 probe = await provider.search(
                     work.claim_id,
                     claims_by_id[work.claim_id],
@@ -517,6 +527,26 @@ class ProductionCalibrationCollector:
                     deep=True,
                 )
                 persist_activity(activity_path, activity)
+                completed_this_invocation += 1
+                remaining = any(
+                    item.status is not CalibrationItemStatus.COMPLETE for item in state.items
+                )
+                if max_cases is not None and completed_this_invocation >= max_cases and remaining:
+                    activity = transition_activity_phase(
+                        activity,
+                        phase="calibration",
+                        status=CampaignStatus.PAUSED,
+                        stop_reason=CampaignStopReason.USER_PAUSED,
+                    )
+                    persist_activity(activity_path, activity)
+                    return {
+                        "status": CampaignStatus.PAUSED.value,
+                        "activity_id": plan.activity_id,
+                        "completed_cases": sum(
+                            item.status is CalibrationItemStatus.COMPLETE for item in state.items
+                        ),
+                        "paused": True,
+                    }
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as exc:

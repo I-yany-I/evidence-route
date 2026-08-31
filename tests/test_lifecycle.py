@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from evidence_route.evaluation.activity import (
+    CalibrationArtifactLink,
     CampaignStatus,
     CampaignStopReason,
     FreezeIdentity,
@@ -20,6 +21,7 @@ from evidence_route.evaluation.lifecycle import (
     load_activity,
     mark_calibration_complete,
     persist_activity,
+    resume_activity_after_billing_recovery,
     resume_activity_phase,
     transition_activity_phase,
     verify_current_freeze,
@@ -327,7 +329,14 @@ def test_activity_billing_flag_requires_typed_billing_stop() -> None:
         )
 
 
-def test_resume_activity_phase_clears_only_process_interruption() -> None:
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (CampaignStatus.INTERRUPTED, CampaignStopReason.PROCESS_INTERRUPTION),
+        (CampaignStatus.PAUSED, CampaignStopReason.USER_PAUSED),
+    ],
+)
+def test_resume_activity_phase_clears_resumable_pause(status, reason) -> None:
     activity = build_initial_activity(
         activity_id="activity-1",
         calibration_plan_sha256="a" * 64,
@@ -337,14 +346,48 @@ def test_resume_activity_phase_clears_only_process_interruption() -> None:
     interrupted = transition_activity_phase(
         activity,
         phase="calibration",
-        status=CampaignStatus.INTERRUPTED,
-        stop_reason=CampaignStopReason.PROCESS_INTERRUPTION,
+        status=status,
+        stop_reason=reason,
     )
     resumed = resume_activity_phase(interrupted, phase="calibration")
     assert resumed.calibration_status is CampaignStatus.RUNNING
     assert resumed.stop_reason is None
-    with pytest.raises(ValueError, match="process_interruption"):
+    with pytest.raises(ValueError, match="can be resumed"):
         resume_activity_phase(activity, phase="calibration")
+
+
+def test_resume_activity_after_billing_recovery_clears_only_billing_stop() -> None:
+    activity = build_initial_activity(
+        activity_id="activity-1",
+        calibration_plan_sha256="a" * 64,
+        calibration_state_sha256="b" * 64,
+        case_ids=[f"{index:064x}" for index in range(32)],
+    )
+    calibrated = mark_calibration_complete(
+        activity.model_copy(
+            update={
+                "calibration_artifacts": [
+                    CalibrationArtifactLink(case_id=f"{index:064x}", artifact_sha256="c" * 64)
+                    for index in range(32)
+                ]
+            },
+            deep=True,
+        )
+    )
+    stopped = transition_activity_phase(
+        calibrated,
+        phase="dev",
+        status=CampaignStatus.INCOMPLETE_COST_UNCERTAIN,
+        stop_reason=CampaignStopReason.BILLING_UNCERTAIN,
+        billing_uncertain=True,
+    )
+
+    resumed = resume_activity_after_billing_recovery(stopped, phase="dev")
+
+    assert resumed.dev_status is CampaignStatus.RUNNING
+    assert resumed.stop_reason is None
+    assert resumed.billing_uncertain is False
+    assert resumed.status is CampaignStatus.RUNNING
 
 
 def test_verify_git_freeze_requires_clean_worktree_and_ancestor(tmp_path: Path) -> None:

@@ -481,6 +481,7 @@ def transition_activity_phase(
         status = CampaignStatus(status)
     current = getattr(activity, f"{phase}_status")
     terminal_statuses = {
+        CampaignStatus.PAUSED,
         CampaignStatus.INTERRUPTED,
         CampaignStatus.INCOMPLETE_BUDGET,
         CampaignStatus.INCOMPLETE_MODEL_DRIFT,
@@ -560,14 +561,49 @@ def transition_activity_phase(
 
 
 def resume_activity_phase(activity: ActivityRecord, *, phase: str) -> ActivityRecord:
-    """Atomically clear the sole resumable process-interruption marker."""
+    """Atomically clear a resumable process-interruption or user-pause marker."""
 
     if phase not in {"calibration", "dev", "stability"}:
         raise ValueError("activity phase must be calibration, dev, or stability")
-    if activity.stop_reason is not CampaignStopReason.PROCESS_INTERRUPTION:
-        raise ValueError("only process_interruption can be resumed")
-    if getattr(activity, f"{phase}_status") is not CampaignStatus.INTERRUPTED:
-        raise ValueError("phase is not interrupted")
+    resumable = {
+        CampaignStopReason.PROCESS_INTERRUPTION: CampaignStatus.INTERRUPTED,
+        CampaignStopReason.USER_PAUSED: CampaignStatus.PAUSED,
+    }
+    expected_status = resumable.get(activity.stop_reason)
+    if expected_status is None:
+        raise ValueError("only process_interruption or user_paused can be resumed")
+    if getattr(activity, f"{phase}_status") is not expected_status:
+        raise ValueError("phase is not resumable")
+    updated = activity.model_copy(
+        update={
+            f"{phase}_status": CampaignStatus.RUNNING,
+            "stop_reason": None,
+            "billing_uncertain": False,
+        },
+        deep=True,
+    )
+    updated.status = derive_activity_status(
+        updated.calibration_status,
+        updated.dev_status,
+        updated.stability_status,
+        billing_uncertain=False,
+    )
+    return ActivityRecord.model_validate(updated.model_dump(mode="python"))
+
+
+def resume_activity_after_billing_recovery(
+    activity: ActivityRecord, *, phase: str
+) -> ActivityRecord:
+    """Clear a billing stop only after an explicit ledger recovery decision."""
+
+    if phase not in {"calibration", "dev", "stability"}:
+        raise ValueError("activity phase must be calibration, dev, or stability")
+    if activity.stop_reason is not CampaignStopReason.BILLING_UNCERTAIN:
+        raise ValueError("activity is not stopped for billing uncertainty")
+    if not activity.billing_uncertain:
+        raise ValueError("billing recovery requires billing_uncertain=True")
+    if getattr(activity, f"{phase}_status") is not CampaignStatus.INCOMPLETE_COST_UNCERTAIN:
+        raise ValueError("phase is not stopped for billing uncertainty")
     updated = activity.model_copy(
         update={
             f"{phase}_status": CampaignStatus.RUNNING,
@@ -640,6 +676,7 @@ __all__ = [
     "load_activity",
     "mark_calibration_complete",
     "persist_activity",
+    "resume_activity_after_billing_recovery",
     "resume_activity_phase",
     "seal_activity",
     "sha256_bytes",

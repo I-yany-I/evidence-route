@@ -19,6 +19,7 @@ from evidence_route.evaluation.activity import (
         (CampaignStopReason.INTERNAL_ERROR, CampaignStatus.FAILED),
         (CampaignStopReason.USER_CANCELLED, CampaignStatus.CANCELLED),
         (CampaignStopReason.PROCESS_INTERRUPTION, CampaignStatus.INTERRUPTED),
+        (CampaignStopReason.USER_PAUSED, CampaignStatus.PAUSED),
     ],
 )
 def test_stop_reason_precedence_and_status_mapping(reason, status) -> None:
@@ -41,6 +42,18 @@ def test_billing_uncertainty_precedes_process_interruption() -> None:
             billing_uncertain=True,
         )
         is CampaignStatus.INCOMPLETE_COST_UNCERTAIN
+    )
+
+
+def test_user_pause_is_lower_priority_than_safety_stops() -> None:
+    assert (
+        derive_activity_status(
+            CampaignStatus.COMPLETE,
+            CampaignStatus.PAUSED,
+            CampaignStatus.PLANNED,
+            stop_reason=CampaignStopReason.USER_PAUSED,
+        )
+        is CampaignStatus.PAUSED
     )
 
 

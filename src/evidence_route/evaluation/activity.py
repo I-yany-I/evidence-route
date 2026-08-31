@@ -38,6 +38,7 @@ class WorkStatus(StrEnum):
 class CampaignStatus(StrEnum):
     PLANNED = "planned"
     RUNNING = "running"
+    PAUSED = "paused"
     INTERRUPTED = "interrupted"
     COMPLETE = "complete"
     INCOMPLETE_BUDGET = "incomplete_budget"
@@ -56,6 +57,7 @@ class CampaignStopReason(StrEnum):
     BILLING_UNCERTAIN = "billing_uncertain"
     USER_CANCELLED = "user_cancelled"
     INTERNAL_ERROR = "internal_error"
+    USER_PAUSED = "user_paused"
 
 
 class FreezeMismatch(ValueError):
@@ -573,6 +575,7 @@ _STOP_PRECEDENCE: tuple[CampaignStopReason, ...] = (
     CampaignStopReason.INTERNAL_ERROR,
     CampaignStopReason.USER_CANCELLED,
     CampaignStopReason.PROCESS_INTERRUPTION,
+    CampaignStopReason.USER_PAUSED,
 )
 
 _STOP_STATUS: dict[CampaignStopReason, CampaignStatus] = {
@@ -583,6 +586,7 @@ _STOP_STATUS: dict[CampaignStopReason, CampaignStatus] = {
     CampaignStopReason.INTERNAL_ERROR: CampaignStatus.FAILED,
     CampaignStopReason.USER_CANCELLED: CampaignStatus.CANCELLED,
     CampaignStopReason.PROCESS_INTERRUPTION: CampaignStatus.INTERRUPTED,
+    CampaignStopReason.USER_PAUSED: CampaignStatus.PAUSED,
 }
 
 _STATUS_STOP: dict[CampaignStatus, CampaignStopReason] = {

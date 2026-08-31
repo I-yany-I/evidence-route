@@ -113,6 +113,15 @@ evidence-route verify `
 
 ## Run Calibration And Evaluation
 
+正式运行支持在完整 case/item 边界暂停，适合网络不稳定或电脑需要休息的情况。默认每次校准最多运行 4 个 case，正式评测最多运行 10 个 item；暂停不会取消正在进行的请求，也不会改变冻结的 manifest、prompt、模型、价格或路由配置。
+
+下一批对同一 activity 使用相同路径并加上 `--resume`。校准命令使用 `--max-cases 4`，正式评测命令使用 `--max-items 10`。只有全部 item 完成、账务完整且模型身份一致时，才允许生成最终报告。
+
+稳定性加固实验必须使用新的 `activity-id` 和独立 `--experiment-dir`，并提供父 Gate A 的
+`--parent-activity` 与 `--parent-report`。程序会在构造 transport 前核对父报告、manifest、价格、配置、prompt
+和 stability manifest 的 SHA-256；父目录 `reports/evidence-route-gate-a-20260830-clean1` 保持不可修改。
+实验身份写入 `experiment.json`，重复 0 只有在 artifact 指纹与父链接一致时才允许复用。
+
 `evaluate` 预览和 `calibrate --collect` 在没有付费确认时只输出启动预算/调用上界，不构造网络 transport；`calibrate --replay` 则只重放已保存 artifact，同样不新增模型调用。
 
 ```powershell
@@ -136,7 +145,10 @@ calibration 收集、保存结果 replay、冻结策略、三策略交错 dev、
 ## Results
 
 <!-- EVIDENCE_ROUTE_RESULTS_START -->
-Final frozen run not generated yet. Do not quote design targets as measured results.
+- Benchmark: AVeriTeC dev balanced subset (n=80)
+- Adaptive full-manifest macro-F1: 0.392
+- Adaptive completion rate: 90.0%
+- Token reduction vs always_multi: 21.8%
 <!-- EVIDENCE_ROUTE_RESULTS_END -->
 
 这里的结果不是官方 leaderboard 成绩。只有完整 campaign 通过发布门禁后，报告命令才会从

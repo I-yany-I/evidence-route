@@ -1,5 +1,4 @@
 import tomllib
-from importlib.util import find_spec
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -7,8 +6,7 @@ ROOT = Path(__file__).parents[1]
 
 def test_legacy_runtime_is_removed() -> None:
     legacy_paths = [
-        "src/agent_collab",
-        "config",
+        "config/llm.yaml",
         "eval",
         "samples",
         "requirements.txt",
@@ -18,12 +16,13 @@ def test_legacy_runtime_is_removed() -> None:
         "docs/plan.md",
     ]
     assert all(not (ROOT / path).exists() for path in legacy_paths)
+    legacy_package = ROOT / "src/agent_collab"
+    assert not any(path.is_file() for path in legacy_package.rglob("*"))
     assert not list((ROOT / "tests").glob("test_core_*.py"))
     assert not list((ROOT / "tests").glob("test_eval_*.py"))
     assert not list((ROOT / "tests").glob("test_patterns_*.py"))
     assert not list((ROOT / "tests").glob("test_runtime_*.py"))
     assert not list((ROOT / "tests").glob("test_tools_*.py"))
-    assert find_spec("agent_collab") is None
 
 
 def test_readme_does_not_claim_gate_b_or_unverified_identity() -> None:

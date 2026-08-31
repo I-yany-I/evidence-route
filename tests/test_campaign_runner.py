@@ -147,6 +147,45 @@ def test_schedule_is_deterministic_cyclic_and_interleaved() -> None:
     assert schedule == build_dev_schedule(claims, seed=20260817, campaign_id="campaign")
 
 
+@pytest.mark.asyncio
+async def test_campaign_runner_pauses_after_item_limit_and_resumes_without_replay(
+    tmp_path: Path, campaign_factory
+) -> None:
+    first_executor = campaign_factory.executor()
+    first = CampaignRunner(tmp_path, first_executor)
+
+    paused = await first.run(campaign_factory.plan(), max_items=2)
+
+    assert paused.status is CampaignStatus.PAUSED
+    assert paused.stop_reason is CampaignStopReason.USER_PAUSED
+    assert first_executor.calls == 2
+    assert [item.status for item in paused.items[:2]] == [
+        WorkStatus.COMPLETED,
+        WorkStatus.COMPLETED,
+    ]
+    assert all(item.status is WorkStatus.PENDING for item in paused.items[2:])
+
+    second_executor = campaign_factory.executor()
+    resumed = await CampaignRunner(tmp_path, second_executor).resume(max_items=2)
+
+    assert resumed.status is CampaignStatus.PAUSED
+    assert resumed.stop_reason is CampaignStopReason.USER_PAUSED
+    assert second_executor.calls == 2
+    assert all(
+        item.status is WorkStatus.COMPLETED for item in resumed.items[:4]
+    )
+
+
+@pytest.mark.asyncio
+async def test_campaign_runner_rejects_non_positive_item_limit(
+    tmp_path: Path, campaign_factory
+) -> None:
+    with pytest.raises(ValueError, match="max_items"):
+        await CampaignRunner(tmp_path, campaign_factory.executor()).run(
+            campaign_factory.plan(), max_items=0
+        )
+
+
 def test_campaign_schedule_uses_frozen_stability_manifest_order() -> None:
     dev_claims = [{"claim_id": f"dev-{index}"} for index in range(21)]
     stability_claims = [

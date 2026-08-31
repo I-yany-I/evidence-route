@@ -265,6 +265,13 @@ class SQLiteRunStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_calls_run_id ON calls(run_id);
                 CREATE INDEX IF NOT EXISTS idx_calls_activity_id ON calls(activity_id);
+                CREATE TABLE IF NOT EXISTS billing_recovery_events (
+                    call_id TEXT PRIMARY KEY,
+                    action TEXT NOT NULL CHECK (action = 'authorized_retry'),
+                    reason TEXT NOT NULL,
+                    evidence TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             row = connection.execute("SELECT * FROM store_metadata WHERE singleton = 1").fetchone()
@@ -395,6 +402,67 @@ class SQLiteRunStore:
 
     def mark_billing_uncertain(self, call_id: str) -> None:
         self._transition(call_id, CallState.SENT, CallState.BILLING_UNCERTAIN)
+
+    def authorize_billing_uncertain_retry(
+        self, call_id: str, *, reason: str, evidence: str
+    ) -> None:
+        """Explicitly unlock one uncertain call for a potentially duplicate retry.
+
+        The original uncertain state is retained in ``billing_recovery_events`` so a human
+        decision to retry cannot be confused with a provider-confirmed completion.
+        """
+
+        if not reason.strip() or not evidence.strip():
+            raise ValueError("billing recovery reason and evidence must be non-empty")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state FROM calls WHERE call_id = ?", (call_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(call_id)
+            if row["state"] != CallState.BILLING_UNCERTAIN.value:
+                raise BillingStateError(
+                    "only a billing_uncertain call can receive explicit retry authorization"
+                )
+            existing = connection.execute(
+                "SELECT action, reason, evidence FROM billing_recovery_events WHERE call_id = ?",
+                (call_id,),
+            ).fetchone()
+            if existing is not None:
+                if (existing["reason"], existing["evidence"]) != (reason, evidence):
+                    raise BillingStateError("billing recovery authorization already differs")
+            else:
+                connection.execute(
+                    "INSERT INTO billing_recovery_events "
+                    "(call_id, action, reason, evidence, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (call_id, "authorized_retry", reason, evidence, _timestamp()),
+                )
+            connection.execute(
+                "UPDATE calls SET state = ?, updated_at = ? WHERE call_id = ?",
+                (CallState.RESERVED.value, _timestamp(), call_id),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def get_billing_recovery_event(self, call_id: str) -> dict[str, str] | None:
+        """Return the audit record for an explicitly authorized uncertain-call retry."""
+
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT call_id, action, reason, evidence, created_at "
+                "FROM billing_recovery_events WHERE call_id = ?",
+                (call_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            connection.close()
 
     def _transition(
         self,

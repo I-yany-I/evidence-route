@@ -105,6 +105,29 @@ def test_sent_without_completion_blocks_automatic_resume(tmp_path: Path) -> None
         reopened.resume_decision("call-1", request_sha256="a" * 64)
 
 
+def test_explicit_billing_recovery_authorizes_one_retry_and_audits(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    reserve(store)
+    store.mark_sent("call-1")
+    store.mark_billing_uncertain("call-1")
+
+    store.authorize_billing_uncertain_retry(
+        "call-1",
+        reason="provider dashboard shows the request was billed",
+        evidence="2026-08-31 15:05:04; input=2279; output=266; cost=$0.003488",
+    )
+
+    reopened = make_store(tmp_path)
+    assert reopened.resume_decision("call-1", request_sha256="a" * 64).action == "send"
+    metadata = reopened.get_call_metadata("call-1")
+    assert metadata is not None
+    assert metadata["state"] == "reserved"
+    event = reopened.get_billing_recovery_event("call-1")
+    assert event is not None
+    assert event["action"] == "authorized_retry"
+    assert event["reason"] == "provider dashboard shows the request was billed"
+
+
 def test_parallel_reservations_are_serialized_without_crossing_cap(tmp_path: Path) -> None:
     barrier = Barrier(2)
 

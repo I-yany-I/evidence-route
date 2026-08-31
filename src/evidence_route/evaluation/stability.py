@@ -9,6 +9,7 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 from pydantic import Field
 
+from evidence_route.config import stable_hash
 from evidence_route.contracts import StrictModel, VerificationResult
 from evidence_route.evaluation.activity import RunArtifact
 
@@ -66,6 +67,94 @@ class StabilityDiagnosticSummary(StrictModel):
     consistent_claim_count: int = Field(ge=0)
     category_counts: dict[str, Annotated[int, Field(ge=0)]]
     records: list[StabilityClaimDiagnostic]
+    repeat_schedule: dict[str, list[int]] = Field(default_factory=dict)
+    parent_activity_id: str | None = None
+
+
+class StabilityComparison(StrictModel):
+    baseline_activity_id: str
+    baseline_campaign_id: str
+    experiment_activity_id: str
+    experiment_campaign_id: str
+    baseline_diagnostic_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    experiment_diagnostic_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    baseline_category_counts: dict[str, int]
+    experiment_category_counts: dict[str, int]
+    category_count_deltas: dict[str, int]
+    improved_claims: list[str]
+    regressed_claims: list[str]
+    unchanged_claims: list[str]
+    baseline_consistent_claim_count: int = Field(ge=0)
+    experiment_consistent_claim_count: int = Field(ge=0)
+    baseline_completion_rate: float = Field(ge=0, le=1)
+    experiment_completion_rate: float = Field(ge=0, le=1)
+
+
+def _diagnostic_hash(summary: StabilityDiagnosticSummary) -> str:
+    return stable_hash(summary.model_dump(mode="json"))
+
+
+def _completion_rate(summary: StabilityDiagnosticSummary) -> float:
+    total = sum(len(record.repeats) for record in summary.records)
+    valid = sum(snapshot.valid for record in summary.records for snapshot in record.repeats)
+    return valid / total if total else 0.0
+
+
+def build_stability_comparison(
+    baseline: StabilityDiagnosticSummary,
+    experiment: StabilityDiagnosticSummary,
+) -> StabilityComparison:
+    baseline_claims = {record.claim_id: record for record in baseline.records}
+    experiment_claims = {record.claim_id: record for record in experiment.records}
+    if set(baseline_claims) != set(experiment_claims):
+        raise ValueError("stability comparison requires identical claim sets")
+    if baseline.repeat_schedule and experiment.repeat_schedule:
+        if baseline.repeat_schedule != experiment.repeat_schedule:
+            raise ValueError("stability comparison requires identical repeat schedules")
+    if (
+        baseline.parent_activity_id is not None
+        and experiment.parent_activity_id is not None
+        and baseline.parent_activity_id != experiment.parent_activity_id
+    ):
+        raise ValueError("stability comparison requires identical parent activity identities")
+
+    improved: list[str] = []
+    regressed: list[str] = []
+    unchanged: list[str] = []
+    for claim_id in sorted(baseline_claims):
+        baseline_stable = not baseline_claims[claim_id].categories
+        experiment_stable = not experiment_claims[claim_id].categories
+        if experiment_stable and not baseline_stable:
+            improved.append(claim_id)
+        elif baseline_stable and not experiment_stable:
+            regressed.append(claim_id)
+        else:
+            unchanged.append(claim_id)
+
+    category_names = sorted(
+        set(baseline.category_counts) | set(experiment.category_counts)
+    )
+    return StabilityComparison(
+        baseline_activity_id=baseline.activity_id,
+        baseline_campaign_id=baseline.campaign_id,
+        experiment_activity_id=experiment.activity_id,
+        experiment_campaign_id=experiment.campaign_id,
+        baseline_diagnostic_sha256=_diagnostic_hash(baseline),
+        experiment_diagnostic_sha256=_diagnostic_hash(experiment),
+        baseline_category_counts=dict(sorted(baseline.category_counts.items())),
+        experiment_category_counts=dict(sorted(experiment.category_counts.items())),
+        category_count_deltas={
+            name: experiment.category_counts.get(name, 0) - baseline.category_counts.get(name, 0)
+            for name in category_names
+        },
+        improved_claims=improved,
+        regressed_claims=regressed,
+        unchanged_claims=unchanged,
+        baseline_consistent_claim_count=baseline.consistent_claim_count,
+        experiment_consistent_claim_count=experiment.consistent_claim_count,
+        baseline_completion_rate=_completion_rate(baseline),
+        experiment_completion_rate=_completion_rate(experiment),
+    )
 
 
 def build_stability_diagnostics(

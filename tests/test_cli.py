@@ -192,6 +192,37 @@ def test_paid_evaluate_forwards_batch_limit(tmp_path: Path) -> None:
     assert services.last_evaluate["max_items"] == 3
 
 
+def test_paid_evaluate_forwards_isolated_experiment_identity(tmp_path: Path) -> None:
+    services = FakeServices()
+    result = CliRunner().invoke(
+        create_app(services),
+        [
+            "evaluate",
+            "--manifest",
+            str(tmp_path / "dev.json"),
+            "--stability-manifest",
+            str(tmp_path / "stability.json"),
+            "--activity-dir",
+            str(tmp_path / "activity"),
+            "--calibration-report",
+            str(tmp_path / "calibration-report.json"),
+            "--accept-paid-campaign",
+            "--start-after-calibration",
+            "--parent-activity",
+            "gate-a-20260830",
+            "--parent-report",
+            str(tmp_path / "parent-report.json"),
+            "--experiment-dir",
+            str(tmp_path / "experiment"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert services.last_evaluate["parent_activity"] == "gate-a-20260830"
+    assert services.last_evaluate["parent_report"] == tmp_path / "parent-report.json"
+    assert services.last_evaluate["experiment_dir"] == tmp_path / "experiment"
+
+
 def test_calibrate_forwards_default_and_explicit_case_limits(tmp_path: Path) -> None:
     services = FakeServices()
     base = [
