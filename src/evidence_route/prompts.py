@@ -15,9 +15,10 @@ SYSTEM_PROMPT = (
 SINGLE_PROMPT = SYSTEM_PROMPT + " Verify the claim against the retrieved evidence."
 DECOMPOSER_PROMPT = SYSTEM_PROMPT + " Decompose the claim into one to three atomic tasks."
 WORKER_PROMPT = SYSTEM_PROMPT + " Answer the assigned verification task."
-JUDGE_PROMPT = (
-    SYSTEM_PROMPT
-    + " Judge the worker records and deduplicate their citations."
+JUDGE_PROMPT = SYSTEM_PROMPT + " Judge the worker records and deduplicate their citations."
+HARDENED_PROMPT_VERSION = "2026-09-01-evidence-route-hardened-v1"
+HARDENED_JUDGE_PROMPT = (
+    JUDGE_PROMPT
     + " Choose exactly one verdict from Supported, Refuted, Not Enough Evidence, or "
     + "Conflicting Evidence/Cherrypicking."
     + " If the evidence is insufficient, the verdict must be Not Enough Evidence."
@@ -35,6 +36,18 @@ def prompt_hash() -> str:
         DECOMPOSER_PROMPT,
         WORKER_PROMPT,
         JUDGE_PROMPT,
+    ]
+    return hashlib.sha256("\n".join(values).encode("utf-8")).hexdigest()
+
+
+def hardened_prompt_hash() -> str:
+    values = [
+        HARDENED_PROMPT_VERSION,
+        SYSTEM_PROMPT,
+        SINGLE_PROMPT,
+        DECOMPOSER_PROMPT,
+        WORKER_PROMPT,
+        HARDENED_JUDGE_PROMPT,
     ]
     return hashlib.sha256("\n".join(values).encode("utf-8")).hexdigest()
 
@@ -95,7 +108,9 @@ def worker_messages(task: VerificationTask, evidence: list[Evidence]) -> list[di
     ]
 
 
-def judge_messages(claim: str, workers: list[WorkerResult]) -> list[dict[str, str]]:
+def _judge_messages(
+    claim: str, workers: list[WorkerResult], prompt: str
+) -> list[dict[str, str]]:
     serialized_workers = [
         item.model_dump(mode="json")
         if hasattr(item, "model_dump")
@@ -103,7 +118,7 @@ def judge_messages(claim: str, workers: list[WorkerResult]) -> list[dict[str, st
         for item in workers
     ]
     return [
-        {"role": "system", "content": JUDGE_PROMPT},
+        {"role": "system", "content": prompt},
         {
             "role": "user",
             "content": json.dumps(
@@ -113,3 +128,11 @@ def judge_messages(claim: str, workers: list[WorkerResult]) -> list[dict[str, st
             ),
         },
     ]
+
+
+def judge_messages(claim: str, workers: list[WorkerResult]) -> list[dict[str, str]]:
+    return _judge_messages(claim, workers, JUDGE_PROMPT)
+
+
+def hardened_judge_messages(claim: str, workers: list[WorkerResult]) -> list[dict[str, str]]:
+    return _judge_messages(claim, workers, HARDENED_JUDGE_PROMPT)

@@ -137,7 +137,9 @@ def test_adaptive_single_validation_error_still_escalates_with_typed_errors() ->
         update={"citations": [citation], "available_evidence_ids": ["unknown"]}
     )
 
-    decision = ResultValidator(low_confidence=0.65, minimum_coverage=1.0).validate(
+    decision = ResultValidator(
+        low_confidence=0.65, minimum_coverage=1.0, normalize_output=True
+    ).validate(
         result=result,
         claim_unit_ids=["u0"],
         evidence_ids={"known"},
@@ -162,7 +164,9 @@ def test_final_validation_failure_is_normalized_without_promoting_status() -> No
         }
     )
 
-    decision = ResultValidator(low_confidence=0.65, minimum_coverage=1.0).validate(
+    decision = ResultValidator(
+        low_confidence=0.65, minimum_coverage=1.0, normalize_output=True
+    ).validate(
         result=result,
         claim_unit_ids=["u0"],
         evidence_ids=set(),
@@ -175,3 +179,44 @@ def test_final_validation_failure_is_normalized_without_promoting_status() -> No
     assert decision.result.verdict is None
     assert decision.result.rationale == "INSUFFICIENT_COVERAGE; LOW_CONFIDENCE"
     assert decision.result.available_evidence_ids == ["e1", "e2"]
+
+
+def test_validator_default_preserves_legacy_result_object_and_fields() -> None:
+    result = valid_result().model_copy(
+        update={
+            "rationale": "  draft  ",
+            "errors": [" LOW_CONFIDENCE ", "LOW_CONFIDENCE"],
+            "available_evidence_ids": [" e2 ", "e1", "e2 "],
+        }
+    )
+
+    decision = ResultValidator(low_confidence=0.65, minimum_coverage=0.0).validate(
+        result=result,
+        claim_unit_ids=["u0"],
+        evidence_ids=set(),
+        escalation_count=1,
+        strategy="adaptive",
+    )
+
+    assert decision.action is ValidationAction.ACCEPT
+    assert decision.result is result
+    assert decision.result.rationale == "  draft  "
+    assert decision.result.errors == [" LOW_CONFIDENCE ", "LOW_CONFIDENCE"]
+
+
+def test_validator_normalizes_only_when_opted_in() -> None:
+    result = valid_result().model_copy(update={"rationale": "  draft  "})
+
+    decision = ResultValidator(
+        low_confidence=0.65, minimum_coverage=0.0, normalize_output=True
+    ).validate(
+        result=result,
+        claim_unit_ids=["u0"],
+        evidence_ids=set(),
+        escalation_count=1,
+        strategy="adaptive",
+    )
+
+    assert decision.action is ValidationAction.ACCEPT
+    assert decision.result is not result
+    assert decision.result.rationale == "draft"

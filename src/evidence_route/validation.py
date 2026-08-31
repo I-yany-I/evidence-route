@@ -73,9 +73,12 @@ def normalize_verification_result(result: VerificationResult) -> VerificationRes
 
 
 class ResultValidator:
-    def __init__(self, *, low_confidence: float, minimum_coverage: float) -> None:
+    def __init__(
+        self, *, low_confidence: float, minimum_coverage: float, normalize_output: bool = False
+    ) -> None:
         self.low_confidence = low_confidence
         self.minimum_coverage = minimum_coverage
+        self.normalize_output = normalize_output
 
     def validate(
         self,
@@ -87,7 +90,7 @@ class ResultValidator:
         strategy: Strategy | str,
         draft_origin: str | None = None,
     ) -> ValidationDecision:
-        normalized = normalize_verification_result(result)
+        normalized = normalize_verification_result(result) if self.normalize_output else result
         if normalized.status == ResultStatus.FAILED:
             return ValidationDecision(
                 ValidationAction.FAIL, normalized, tuple(normalized.errors)
@@ -135,6 +138,5 @@ class ResultValidator:
             latency_ms=normalized.latency_ms,
             errors=[*normalized.errors, *errors],
         )
-        return ValidationDecision(
-            ValidationAction.FAIL, normalize_verification_result(failed), tuple(errors)
-        )
+        final_result = normalize_verification_result(failed) if self.normalize_output else failed
+        return ValidationDecision(ValidationAction.FAIL, final_result, tuple(errors))
