@@ -164,7 +164,7 @@ def _run_store_accounting(
 ) -> tuple[str | None, int | None, int | None, int | None]:
     if run_store is None:
         return (
-            _strategy_route_source(getattr(artifact, "strategy", None)),
+            None,
             None,
             None,
             _safe_nonnegative_int(getattr(artifact, "cache_hit_count", None)),

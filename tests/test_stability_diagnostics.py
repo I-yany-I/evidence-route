@@ -391,6 +391,7 @@ def test_route_source_escalation_and_worker_count_are_route_drift() -> None:
     assert record.repeats[1].cache_hits == 2
 
     fallback = _diagnostics({"claim": {0: artifact, 1: artifact, 2: artifact}}).records[0]
+    assert fallback.repeats[0].route_source is None
     assert fallback.repeats[0].worker_count is None
     assert fallback.repeats[0].transport_attempts is None
     assert fallback.repeats[0].cache_hits == artifact.cache_hit_count
