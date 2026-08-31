@@ -102,6 +102,23 @@ def test_canonicalize_citation_url_removes_fragment_default_port_and_trailing_sl
     ) == "https://example.com/fact?a=1&b=2"
 
 
+def test_canonicalize_citation_url_preserves_blank_query_values() -> None:
+    assert canonicalize_citation_url("https://example.com/fact?a=") == (
+        "https://example.com/fact?a="
+    )
+    assert canonicalize_citation_url("https://example.com/fact") != (
+        "https://example.com/fact?a="
+    )
+
+
+def test_canonicalize_citation_url_sorts_repeated_query_parameters() -> None:
+    first = canonicalize_citation_url("https://example.com/fact?b=2&a=2&a=&a=1")
+    second = canonicalize_citation_url("https://example.com/fact?a=1&b=2&a=&a=2")
+
+    assert first == "https://example.com/fact?a=&a=1&a=2&b=2"
+    assert second == first
+
+
 def test_canonicalize_citation_url_requires_absolute_url() -> None:
     with pytest.raises(ValueError):
         canonicalize_citation_url("/relative/fact")
