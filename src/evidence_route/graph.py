@@ -20,7 +20,12 @@ from evidence_route.contracts import (
     VerificationTask,
 )
 from evidence_route.validation import ValidationAction
-from evidence_route.verification import failed_result
+from evidence_route.verification import (
+    EvidenceWorker,
+    SingleVerifier,
+    VerificationEnvelope,
+    failed_result,
+)
 
 
 @dataclass(frozen=True)
@@ -102,6 +107,30 @@ def _timing(node: str, started: float) -> NodeTiming:
     )
 
 
+async def _single_envelope(verifier: Any, state: VerificationState) -> VerificationEnvelope:
+    args = (
+        state["run_id"],
+        state["claim_id"],
+        state["claim_text"],
+        state["claim_features"],
+    )
+    if isinstance(verifier, SingleVerifier) and type(verifier).verify is SingleVerifier.verify:
+        return await verifier.verify_with_evidence(*args)
+    return VerificationEnvelope(result=await verifier.verify(*args), evidence_ids=frozenset())
+
+
+async def _worker_envelope(verifier: Any, payload: WorkerInput) -> VerificationEnvelope:
+    args = (payload["run_id"], payload["claim_id"], payload["task"])
+    if (
+        isinstance(verifier, EvidenceWorker)
+        and type(verifier).verify_task is EvidenceWorker.verify_task
+    ):
+        return await verifier.verify_task_with_evidence(*args)
+    return VerificationEnvelope(
+        result=await verifier.verify_task(*args), evidence_ids=frozenset()
+    )
+
+
 def make_analyze_node(components: GraphComponents):
     async def analyze(state: VerificationState) -> dict[str, Any]:
         started = time.perf_counter()
@@ -153,18 +182,13 @@ def make_route_node(components: GraphComponents):
 
 def make_single_node(components: GraphComponents):
     async def single(state: VerificationState) -> dict[str, Any]:
-        result = await components.single.verify(
-            state["run_id"],
-            state["claim_id"],
-            state["claim_text"],
-            state["claim_features"],
-        )
-        evidence_ids = set(getattr(components.single, "execution_evidence_ids", ()))
+        envelope = await _single_envelope(components.single, state)
+        result = envelope.result
         return {
             "draft_result": result,
             "draft_origin": "single",
             "usage": result.usage,
-            "execution_evidence_ids": evidence_ids,
+            "execution_evidence_ids": set(envelope.evidence_ids),
         }
 
     return single
@@ -182,17 +206,17 @@ def make_decompose_node(components: GraphComponents):
 
 def make_worker_node(components: GraphComponents):
     async def worker(payload: WorkerInput) -> dict[str, Any]:
-        result = await components.worker.verify_task(
-            payload["run_id"], payload["claim_id"], payload["task"]
-        )
-        evidence_ids = set(getattr(components.worker, "execution_evidence_ids", ()))
-        return {"worker_results": [result], "execution_evidence_ids": evidence_ids}
+        envelope = await _worker_envelope(components.worker, payload)
+        return {
+            "worker_results": [envelope.result],
+            "execution_evidence_ids": set(envelope.evidence_ids),
+        }
 
     return worker
 
 
 def make_judge_node(components: GraphComponents):
-    async def judge(state: VerificationState) -> dict[str, Any]:
+    async def judge(state: ExecutionVerificationState) -> dict[str, Any]:
         initial_route = state["route_decision"].route
         result = await components.judge.judge(
             state["run_id"],
@@ -213,7 +237,7 @@ def make_judge_node(components: GraphComponents):
 
 
 def make_validate_node(components: GraphComponents):
-    async def validate(state: VerificationState) -> dict[str, Any]:
+    async def validate(state: ExecutionVerificationState) -> dict[str, Any]:
         result = state["draft_result"]
         evidence_ids = set(state.get("execution_evidence_ids", set()))
         decision = components.validator.validate(

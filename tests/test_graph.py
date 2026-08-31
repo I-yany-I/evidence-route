@@ -1,9 +1,13 @@
+import asyncio
+from dataclasses import replace
+
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
-from evidence_route.config import EvidenceSettings
+from evidence_route.config import EvidenceSettings, GenerationSettings
 from evidence_route.contracts import (
     Citation,
+    Evidence,
     ResultStatus,
     RouteDecision,
     Strategy,
@@ -12,9 +16,9 @@ from evidence_route.contracts import (
     VerificationResult,
     VerificationTask,
 )
-from evidence_route.graph import GraphComponents, build_graph, initial_state
+from evidence_route.graph import GraphComponents, build_graph, initial_state, make_worker_node
 from evidence_route.validation import ResultValidator
-from evidence_route.verification import SingleVerifier
+from evidence_route.verification import EvidenceWorker, SingleVerifier
 
 
 class Provider:
@@ -76,7 +80,6 @@ def forged_result(claim_id):
 class LegacySingle(SingleVerifier):
     def __init__(self):
         self.called = False
-        self._execution_evidence_ids = frozenset()
 
     async def verify(self, run_id, claim_id, claim, features):
         self.called = True
@@ -106,6 +109,47 @@ class Worker:
         )
 
 
+class ConcurrentProvider:
+    async def search(self, claim_id, query, *, top_k, max_chars):
+        if query not in {"one", "two", "three"}:
+            return []
+        return [
+            Evidence(
+                evidence_id=f"worker-{query}",
+                title=query,
+                source_url=f"https://example.org/{query}",
+                text=f"Evidence for {query}.",
+                provider="averitec_frozen",
+                snapshot_sha256="a" * 64,
+                ranking_score=1,
+            )
+        ]
+
+
+class ConcurrentWorkerLLM:
+    async def invoke(self, **kwargs):
+        if kwargs["task_id"] == "t0":
+            await asyncio.sleep(0.01)
+        draft = type(
+            "Draft",
+            (),
+            {
+                "verdict": Verdict.SUPPORTED,
+                "confidence": 0.9,
+                "citations": [],
+                "errors": [],
+            },
+        )()
+        return type(
+            "Response",
+            (),
+            {
+                "value": draft,
+                "usage": Usage(input_tokens=1, output_tokens=1, total_tokens=2, complete=True),
+            },
+        )()
+
+
 class Judge:
     async def judge(self, run_id, claim_id, claim, workers, *, initial_route, escalated):
         return result(claim_id, initial_route, escalated)
@@ -120,6 +164,16 @@ class Validator:
 
         action = self.actions.pop(0)
         return ValidationDecision(ValidationAction(action), kwargs["result"])
+
+
+class RecordingValidator(Validator):
+    def __init__(self):
+        super().__init__()
+        self.evidence_ids = []
+
+    def validate(self, **kwargs):
+        self.evidence_ids.append(set(kwargs["evidence_ids"]))
+        return super().validate(**kwargs)
 
 
 def components(route="single", validator=None):
@@ -200,3 +254,49 @@ async def test_validation_uses_execution_evidence_ids_not_forged_result_availabl
     assert single.called is True
     assert state["final_result"].status is ResultStatus.FAILED
     assert "UNKNOWN_EVIDENCE:forged-evidence" in state["final_result"].errors
+
+
+@pytest.mark.asyncio
+async def test_concurrent_worker_nodes_return_their_own_execution_evidence_ids() -> None:
+    values = components("multi")
+    worker = EvidenceWorker(
+        ConcurrentProvider(), ConcurrentWorkerLLM(), EvidenceSettings(), GenerationSettings()
+    )
+    node = make_worker_node(replace(values, worker=worker))
+    tasks = [
+        VerificationTask(task_id="t0", claim_unit_ids=["u0"], query="one"),
+        VerificationTask(task_id="t1", claim_unit_ids=["u0"], query="two"),
+        VerificationTask(task_id="t2", claim_unit_ids=["u0"], query="three"),
+    ]
+    payloads = [
+        {"run_id": "run-workers", "claim_id": "dev-4", "task": task} for task in tasks
+    ]
+
+    outputs = await asyncio.gather(*(node(payload) for payload in payloads))
+
+    assert [output["execution_evidence_ids"] for output in outputs] == [
+        {"worker-one"},
+        {"worker-two"},
+        {"worker-three"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_multi_worker_graph_validates_against_aggregated_execution_evidence() -> None:
+    values = components("multi")
+    validator = RecordingValidator()
+    worker = EvidenceWorker(
+        ConcurrentProvider(), ConcurrentWorkerLLM(), EvidenceSettings(), GenerationSettings()
+    )
+    graph = build_graph(
+        replace(values, worker=worker, validator=validator), checkpointer=None
+    )
+
+    state = await graph.ainvoke(
+        initial_state("run-workers", "dev-4", "Compound claim", Strategy.ALWAYS_MULTI),
+        config={"configurable": {"thread_id": "run-workers"}},
+    )
+
+    expected = {"worker-one", "worker-two", "worker-three"}
+    assert state["execution_evidence_ids"] == expected
+    assert validator.evidence_ids == [expected]

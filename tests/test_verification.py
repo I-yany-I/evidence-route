@@ -12,11 +12,7 @@ from evidence_route.contracts import (
     Verdict,
     VerificationTask,
 )
-from evidence_route.verification import (
-    ClaimDecomposer,
-    SingleVerifier,
-    VerdictJudge,
-)
+from evidence_route.verification import ClaimDecomposer, SingleVerifier, VerdictJudge
 
 
 def features() -> ClaimFeatures:
@@ -91,11 +87,12 @@ async def test_single_verifier_returns_structured_result() -> None:
     verifier = SingleVerifier(
         Provider(), LLM(draft), EvidenceSettings(), GenerationSettings()
     )
-    result = await verifier.verify("run", "dev-0", "claim", features())
+    envelope = await verifier.verify_with_evidence("run", "dev-0", "claim", features())
+    result = envelope.result
     assert result.status is ResultStatus.COMPLETED
     assert result.verdict is Verdict.SUPPORTED
     assert result.available_evidence_ids == ["av:dev:0:0:0"]
-    assert verifier.execution_evidence_ids == {"av:dev:0:0:0"}
+    assert envelope.evidence_ids == {"av:dev:0:0:0"}
 
 
 @pytest.mark.asyncio
