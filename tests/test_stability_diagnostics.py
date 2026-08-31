@@ -500,6 +500,39 @@ def test_run_store_metadata_failures_use_nullable_fallbacks_without_provider_cal
     ).records[0].repeats[0]
 
     assert snapshot.valid is True
-    assert snapshot.worker_count == 0
-    assert snapshot.transport_attempts == 0
-    assert snapshot.cache_hits == 0
+    assert snapshot.route_source is None
+    assert snapshot.worker_count is None
+    assert snapshot.transport_attempts is None
+    assert snapshot.cache_hits is None
+
+
+def test_none_call_metadata_makes_all_ledger_derived_fields_unknown() -> None:
+    artifact = _artifact()
+    store = _MetadataStore({"call-0": None})
+
+    snapshot = _diagnostics(
+        {"claim": {0: artifact, 1: artifact, 2: artifact}}, store
+    ).records[0].repeats[0]
+
+    assert snapshot.route_source is None
+    assert snapshot.worker_count is None
+    assert snapshot.transport_attempts is None
+    assert snapshot.cache_hits is None
+
+
+def test_malformed_runtime_artifact_is_visible_with_malformed_error_code() -> None:
+    snapshot = _diagnostics(
+        {"claim": {0: object(), 1: None, 2: _artifact()}}
+    ).records[0].repeats[0]
+
+    assert snapshot.valid is False
+    assert snapshot.error_codes == ["MALFORMED_ARTIFACT"]
+    assert snapshot.run_id is None
+    assert snapshot.status is None
+
+
+def test_run_artifact_field_errors_are_not_silently_marked_invalid() -> None:
+    malformed = _artifact().model_copy(update={"result": object()})
+
+    with pytest.raises(AttributeError):
+        _diagnostics({"claim": {0: malformed, 1: malformed, 2: malformed}})

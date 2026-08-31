@@ -10,10 +10,10 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 from pydantic import Field
 
 from evidence_route.contracts import StrictModel, VerificationResult
+from evidence_route.evaluation.activity import RunArtifact
 
 if TYPE_CHECKING:
     from evidence_route.artifacts import SQLiteRunStore
-    from evidence_route.evaluation.activity import RunArtifact
 
 
 class StabilityCategory(StrEnum):
@@ -144,9 +144,8 @@ def _safe_nonnegative_int(value: object) -> int | None:
     return value
 
 
-def _metadata_value(metadata: Mapping[str, object], name: str) -> int:
-    value = _safe_nonnegative_int(metadata.get(name))
-    return value if value is not None else 0
+def _metadata_value(metadata: Mapping[str, object], name: str) -> int | None:
+    return _safe_nonnegative_int(metadata.get(name))
 
 
 def _strategy_route_source(strategy: object) -> str | None:
@@ -170,19 +169,27 @@ def _run_store_accounting(
             _safe_nonnegative_int(getattr(artifact, "cache_hit_count", None)),
         )
 
-    metadata_rows: list[Mapping[str, object]] = []
+    if not artifact.call_ids:
+        return None, None, None, None
+
+    metadata_rows: list[tuple[str, int, int]] = []
     for call_id in getattr(artifact, "call_ids", []):
         try:
             metadata = run_store.get_call_metadata(call_id)
         except Exception:
-            continue
-        if isinstance(metadata, Mapping):
-            metadata_rows.append(metadata)
+            return None, None, None, None
+        if not isinstance(metadata, Mapping) or not isinstance(metadata.get("node"), str):
+            return None, None, None, None
+        transport_attempts = _metadata_value(metadata, "transport_attempts")
+        cache_hits = _metadata_value(metadata, "cache_hits")
+        if transport_attempts is None or cache_hits is None:
+            return None, None, None, None
+        metadata_rows.append((metadata["node"], transport_attempts, cache_hits))
 
-    has_router = any(row.get("node") == "router" for row in metadata_rows)
-    worker_count = sum(row.get("node") == "worker" for row in metadata_rows)
-    transport_attempts = sum(_metadata_value(row, "transport_attempts") for row in metadata_rows)
-    cache_hits = sum(_metadata_value(row, "cache_hits") for row in metadata_rows)
+    has_router = any(node == "router" for node, _, _ in metadata_rows)
+    worker_count = sum(node == "worker" for node, _, _ in metadata_rows)
+    transport_attempts = sum(attempts for _, attempts, _ in metadata_rows)
+    cache_hits = sum(hits for _, _, hits in metadata_rows)
     route_source = "llm" if has_router else _strategy_route_source(artifact.strategy)
     return route_source, worker_count, transport_attempts, cache_hits
 
@@ -190,76 +197,71 @@ def _run_store_accounting(
 def _build_repeat_snapshot(artifact: Any, repeat: int, run_store: Any) -> RepeatSnapshot:
     if artifact is None:
         return RepeatSnapshot(repeat=repeat, valid=False)
-
-    try:
-        result = artifact.result
-        status = _enum_value(result.status)
-        verdict = _enum_value(result.verdict) if result.verdict is not None else None
-        usage = artifact.usage
-        route_source, worker_count, transport_attempts, cache_hits = _run_store_accounting(
-            artifact, run_store
-        )
-        try:
-            urls = citation_urls(result)
-        except Exception:
-            urls = []
-        try:
-            citations_valid = citation_is_valid(result)
-        except Exception:
-            citations_valid = None
-        citation_evidence_ids = sorted(
-            {
-                citation.evidence_id.strip()
-                for citation in result.citations
-                if isinstance(getattr(citation, "evidence_id", None), str)
-                and citation.evidence_id.strip()
-            }
-        )
-        error_codes = _normalize_strings(
-            _normalized_order(getattr(result, "errors", []))
-            + _normalized_order([getattr(result, "failure_stage", None)])
-        )
-        valid = bool(
-            not getattr(artifact, "diagnostic_only", False)
-            and status in {"completed", "partial"}
-            and verdict is not None
-            and getattr(usage, "complete", False)
-        )
+    if not isinstance(artifact, RunArtifact):
         return RepeatSnapshot(
             repeat=repeat,
-            run_id=getattr(artifact, "run_id", None),
-            artifact_sha256=getattr(artifact, "artifact_sha256", None),
-            valid=valid,
-            status=status if isinstance(status, str) else None,
-            verdict=verdict if isinstance(verdict, str) else None,
-            route=getattr(result, "initial_route", None),
-            route_source=route_source,
-            escalated=getattr(result, "escalated", None),
-            worker_count=worker_count,
-            error_codes=error_codes,
-            citation_urls=urls,
-            citations_valid=citations_valid,
-            evidence_ids=citation_evidence_ids,
-            evidence_coverage=_normalized_order(
-                getattr(result, "available_evidence_ids", [])
-            ),
-            selected_evidence_order=_normalized_order(
-                getattr(result, "available_evidence_ids", [])
-            ),
-            input_tokens=_safe_nonnegative_int(getattr(usage, "input_tokens", None)),
-            output_tokens=_safe_nonnegative_int(getattr(usage, "output_tokens", None)),
-            total_tokens=_safe_nonnegative_int(getattr(usage, "total_tokens", None)),
-            fresh_latency_ms=_safe_nonnegative_int(
-                getattr(getattr(artifact, "latency", None), "fresh_end_to_end_ms", None)
-            ),
-            exact_cost_micro_cny=_safe_nonnegative_int(
-                getattr(artifact, "actual_cost_micro_cny", None)
-            ),
-            transport_attempts=transport_attempts,
-            cache_hits=cache_hits,
+            valid=False,
+            error_codes=["MALFORMED_ARTIFACT"],
         )
+
+    result = artifact.result
+    status = _enum_value(result.status)
+    verdict = _enum_value(result.verdict) if result.verdict is not None else None
+    usage = artifact.usage
+    route_source, worker_count, transport_attempts, cache_hits = _run_store_accounting(
+        artifact, run_store
+    )
+    try:
+        urls = citation_urls(result)
     except Exception:
-        return RepeatSnapshot(repeat=repeat, valid=False)
+        urls = []
+    try:
+        citations_valid = citation_is_valid(result)
+    except Exception:
+        citations_valid = None
+    citation_evidence_ids = sorted(
+        {
+            citation.evidence_id.strip()
+            for citation in result.citations
+            if isinstance(getattr(citation, "evidence_id", None), str)
+            and citation.evidence_id.strip()
+        }
+    )
+    error_codes = _normalize_strings(
+        _normalized_order(getattr(result, "errors", []))
+        + _normalized_order([getattr(result, "failure_stage", None)])
+    )
+    valid = bool(
+        not artifact.diagnostic_only
+        and status in {"completed", "partial"}
+        and verdict is not None
+        and usage.complete
+    )
+    return RepeatSnapshot(
+        repeat=repeat,
+        run_id=artifact.run_id,
+        artifact_sha256=artifact.artifact_sha256,
+        valid=valid,
+        status=status if isinstance(status, str) else None,
+        verdict=verdict if isinstance(verdict, str) else None,
+        route=result.initial_route,
+        route_source=route_source,
+        escalated=result.escalated,
+        worker_count=worker_count,
+        error_codes=error_codes,
+        citation_urls=urls,
+        citations_valid=citations_valid,
+        evidence_ids=citation_evidence_ids,
+        evidence_coverage=_normalized_order(result.available_evidence_ids),
+        selected_evidence_order=_normalized_order(result.available_evidence_ids),
+        input_tokens=_safe_nonnegative_int(usage.input_tokens),
+        output_tokens=_safe_nonnegative_int(usage.output_tokens),
+        total_tokens=_safe_nonnegative_int(usage.total_tokens),
+        fresh_latency_ms=artifact.latency.fresh_end_to_end_ms,
+        exact_cost_micro_cny=artifact.actual_cost_micro_cny,
+        transport_attempts=transport_attempts,
+        cache_hits=cache_hits,
+    )
 
 
 def _snapshot_values(snapshots: list[RepeatSnapshot], field: str) -> set[object]:
