@@ -1,5 +1,9 @@
 from evidence_route.contracts import Citation, ResultStatus, Usage, Verdict, VerificationResult
-from evidence_route.validation import ResultValidator, ValidationAction
+from evidence_route.validation import (
+    ResultValidator,
+    ValidationAction,
+    normalize_verification_result,
+)
 
 
 def valid_result() -> VerificationResult:
@@ -71,3 +75,103 @@ def test_second_invalid_result_becomes_failed() -> None:
     assert decision.action is ValidationAction.FAIL
     assert decision.result.status is ResultStatus.FAILED
     assert decision.result.verdict is None
+
+
+def test_normalize_verification_result_cleans_structured_fields() -> None:
+    result = valid_result().model_copy(
+        update={
+            "rationale": "  Evidence supports the claim.  ",
+            "errors": [" LOW_CONFIDENCE ", "", "LOW_CONFIDENCE"],
+            "available_evidence_ids": [" e2 ", "e1", "e2 ", ""],
+            "verdict": "Supported",
+        }
+    )
+
+    normalized = normalize_verification_result(result)
+
+    assert normalized.rationale == "Evidence supports the claim."
+    assert normalized.errors == ["LOW_CONFIDENCE"]
+    assert normalized.available_evidence_ids == ["e1", "e2"]
+    assert normalized.verdict is Verdict.SUPPORTED
+
+
+def test_normalize_verification_result_preserves_distinct_conflicting_verdict() -> None:
+    result = valid_result().model_copy(
+        update={"verdict": "Conflicting Evidence/Cherrypicking"}
+    )
+
+    assert normalize_verification_result(result).verdict is Verdict.CONFLICTING
+
+
+def test_partial_result_gets_explicit_incomplete_coverage_error() -> None:
+    result = valid_result().model_copy(update={"status": ResultStatus.PARTIAL, "errors": []})
+
+    normalized = normalize_verification_result(result)
+
+    assert normalized.status is ResultStatus.PARTIAL
+    assert normalized.verdict is Verdict.SUPPORTED
+    assert normalized.errors == ["INCOMPLETE_COVERAGE"]
+
+
+def test_failed_result_cannot_retain_verdict_after_normalization() -> None:
+    result = valid_result().model_copy(update={"status": ResultStatus.FAILED})
+
+    normalized = normalize_verification_result(result)
+
+    assert normalized.status is ResultStatus.FAILED
+    assert normalized.verdict is None
+    assert normalized.confidence is None
+
+
+def test_adaptive_single_validation_error_still_escalates_with_typed_errors() -> None:
+    citation = Citation(
+        evidence_id="unknown",
+        claim_unit_ids=["u9"],
+        question="q",
+        answer="a",
+        quote="q",
+        stance="supports",
+        source_url="https://example.org/source",
+    )
+    result = valid_result().model_copy(
+        update={"citations": [citation], "available_evidence_ids": ["unknown"]}
+    )
+
+    decision = ResultValidator(low_confidence=0.65, minimum_coverage=1.0).validate(
+        result=result,
+        claim_unit_ids=["u0"],
+        evidence_ids={"known"},
+        escalation_count=0,
+        strategy="adaptive",
+    )
+
+    assert decision.action is ValidationAction.ESCALATE
+    assert decision.errors == (
+        "UNKNOWN_EVIDENCE:unknown",
+        "UNKNOWN_CLAIM_UNIT",
+        "INSUFFICIENT_COVERAGE",
+    )
+
+
+def test_final_validation_failure_is_normalized_without_promoting_status() -> None:
+    result = valid_result().model_copy(
+        update={
+            "rationale": "  draft  ",
+            "available_evidence_ids": [" e2 ", "e1", "e2 "],
+            "confidence": 0.1,
+        }
+    )
+
+    decision = ResultValidator(low_confidence=0.65, minimum_coverage=1.0).validate(
+        result=result,
+        claim_unit_ids=["u0"],
+        evidence_ids=set(),
+        escalation_count=1,
+        strategy="adaptive",
+    )
+
+    assert decision.action is ValidationAction.FAIL
+    assert decision.result.status is ResultStatus.FAILED
+    assert decision.result.verdict is None
+    assert decision.result.rationale == "INSUFFICIENT_COVERAGE; LOW_CONFIDENCE"
+    assert decision.result.available_evidence_ids == ["e1", "e2"]

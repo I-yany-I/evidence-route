@@ -11,6 +11,7 @@ from typing import Any
 from rank_bm25 import BM25Okapi
 
 from evidence_route.contracts import Evidence
+from evidence_route.evaluation.stability import canonicalize_citation_url
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+(?:[-'][a-z0-9]+)?|[\u4e00-\u9fff]", re.I)
 _RETRIEVAL_CONFIG = "evidence-route-regex-bm25-v1"
@@ -62,7 +63,12 @@ class AveritecFrozenProvider:
         scores = index.bm25.get_scores(tokenize(query))
         ranked = sorted(
             zip(index.records, scores, strict=True),
-            key=lambda item: (-float(item[1]), item[0].evidence_id),
+            key=lambda item: (
+                -float(item[1]),
+                item[0].evidence_id,
+                canonicalize_citation_url(item[0].source_url),
+                item[0].snapshot_sha256,
+            ),
         )[:top_k]
         return [
             Evidence(

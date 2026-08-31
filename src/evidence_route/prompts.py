@@ -15,7 +15,16 @@ SYSTEM_PROMPT = (
 SINGLE_PROMPT = SYSTEM_PROMPT + " Verify the claim against the retrieved evidence."
 DECOMPOSER_PROMPT = SYSTEM_PROMPT + " Decompose the claim into one to three atomic tasks."
 WORKER_PROMPT = SYSTEM_PROMPT + " Answer the assigned verification task."
-JUDGE_PROMPT = SYSTEM_PROMPT + " Judge the worker records and deduplicate their citations."
+JUDGE_PROMPT = (
+    SYSTEM_PROMPT
+    + " Judge the worker records and deduplicate their citations."
+    + " Choose exactly one verdict from Supported, Refuted, Not Enough Evidence, or "
+    + "Conflicting Evidence/Cherrypicking."
+    + " If the evidence is insufficient, the verdict must be Not Enough Evidence."
+    + " If the evidence conflicts and cannot be resolved without cherry-picking, the verdict "
+    + "must be Conflicting Evidence/Cherrypicking."
+    + " Cite only evidence present in the worker records; do not invent citations."
+)
 
 
 def prompt_hash() -> str:

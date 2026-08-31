@@ -17,6 +17,7 @@ from evidence_route.contracts import (
     WorkerDraft,
     WorkerResult,
 )
+from evidence_route.evaluation.stability import canonicalize_citation_url
 from evidence_route.llm import BillingUncertain
 from evidence_route.prompts import (
     decomposer_messages,
@@ -39,6 +40,15 @@ def _usage(response: Any) -> Usage:
     return Usage(input_tokens=0, output_tokens=0, total_tokens=0, complete=False)
 
 
+def _canonicalize_citations(citations: list[Any]) -> list[Any]:
+    return [
+        citation.model_copy(
+            update={"source_url": canonicalize_citation_url(str(citation.source_url))}
+        )
+        for citation in citations
+    ]
+
+
 def result_from_draft(
     response: Any,
     claim_id: str,
@@ -55,7 +65,7 @@ def result_from_draft(
         verdict=draft.verdict,
         confidence=draft.confidence,
         rationale=draft.rationale,
-        citations=draft.citations,
+        citations=_canonicalize_citations(draft.citations),
         available_evidence_ids=available_evidence_ids or [item.evidence_id for item in evidence],
         initial_route=initial_route,
         escalated=escalated,
@@ -78,7 +88,7 @@ def worker_result_from_draft(
         status=status,
         verdict=draft.verdict,
         confidence=draft.confidence,
-        citations=draft.citations,
+        citations=_canonicalize_citations(draft.citations),
         available_evidence_ids=available_evidence_ids or [item.evidence_id for item in evidence],
         usage=_usage(response),
         errors=draft.errors,
@@ -246,7 +256,7 @@ class VerdictJudge:
         draft: VerdictDraft = response.value
         citations = []
         seen: set[str] = set()
-        for citation in draft.citations:
+        for citation in _canonicalize_citations(draft.citations):
             if (
                 citation.evidence_id not in seen
                 and len(citations) < self.evidence_settings.judge_max_evidence
