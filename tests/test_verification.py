@@ -88,12 +88,14 @@ async def test_single_verifier_returns_structured_result() -> None:
             "citations": [],
         },
     )()
-    result = await SingleVerifier(
+    verifier = SingleVerifier(
         Provider(), LLM(draft), EvidenceSettings(), GenerationSettings()
-    ).verify("run", "dev-0", "claim", features())
+    )
+    result = await verifier.verify("run", "dev-0", "claim", features())
     assert result.status is ResultStatus.COMPLETED
     assert result.verdict is Verdict.SUPPORTED
     assert result.available_evidence_ids == ["av:dev:0:0:0"]
+    assert verifier.execution_evidence_ids == {"av:dev:0:0:0"}
 
 
 @pytest.mark.asyncio

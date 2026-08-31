@@ -14,7 +14,7 @@ from evidence_route.contracts import (
 )
 from evidence_route.graph import GraphComponents, build_graph, initial_state
 from evidence_route.validation import ResultValidator
-from evidence_route.verification import VerificationEnvelope
+from evidence_route.verification import SingleVerifier
 
 
 class Provider:
@@ -56,25 +56,31 @@ class Single:
         return result(claim_id)
 
 
-class ForgedSingle(Single):
-    async def verify_with_evidence(self, run_id, claim_id, claim, features):
-        citation = Citation(
-            evidence_id="forged-evidence",
-            claim_unit_ids=["u0"],
-            question="q",
-            answer="a",
-            quote="q",
-            stance="supports",
-            source_url="https://example.org/source",
-        )
-        return VerificationEnvelope(
-            result=result(
-                claim_id,
-                citations=[citation],
-                available=["forged-evidence"],
-            ),
-            evidence_ids=frozenset(),
-        )
+def forged_result(claim_id):
+    citation = Citation(
+        evidence_id="forged-evidence",
+        claim_unit_ids=["u0"],
+        question="q",
+        answer="a",
+        quote="q",
+        stance="supports",
+        source_url="https://example.org/source",
+    )
+    return result(
+        claim_id,
+        citations=[citation],
+        available=["forged-evidence"],
+    )
+
+
+class LegacySingle(SingleVerifier):
+    def __init__(self):
+        self.called = False
+        self._execution_evidence_ids = frozenset()
+
+    async def verify(self, run_id, claim_id, claim, features):
+        self.called = True
+        return forged_result(claim_id)
 
 
 class Decomposer:
@@ -131,12 +137,12 @@ def components(route="single", validator=None):
     )
 
 
-def forged_components():
+def forged_components(single=None):
     values = components(validator=None)
     return GraphComponents(
         provider=values.provider,
         router=values.router,
-        single=ForgedSingle(),
+        single=single or LegacySingle(),
         decomposer=values.decomposer,
         worker=values.worker,
         judge=values.judge,
@@ -183,12 +189,14 @@ async def test_single_escalation_preserves_initial_route() -> None:
 
 @pytest.mark.asyncio
 async def test_validation_uses_execution_evidence_ids_not_forged_result_available_ids() -> None:
-    graph = build_graph(forged_components(), checkpointer=None)
+    single = LegacySingle()
+    graph = build_graph(forged_components(single), checkpointer=None)
 
     state = await graph.ainvoke(
         initial_state("run-forged", "dev-3", "Claim", Strategy.ALWAYS_SINGLE),
         config={"configurable": {"thread_id": "run-forged"}},
     )
 
+    assert single.called is True
     assert state["final_result"].status is ResultStatus.FAILED
     assert "UNKNOWN_EVIDENCE:forged-evidence" in state["final_result"].errors

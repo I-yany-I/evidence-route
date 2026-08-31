@@ -132,6 +132,11 @@ class SingleVerifier:
         self.llm = llm
         self.evidence_settings = evidence_settings
         self.generation = generation
+        self._execution_evidence_ids: frozenset[str] = frozenset()
+
+    @property
+    def execution_evidence_ids(self) -> frozenset[str]:
+        return self._execution_evidence_ids
 
     async def verify(
         self, run_id: str, claim_id: str, claim: str, features: ClaimFeatures
@@ -142,6 +147,7 @@ class SingleVerifier:
     async def verify_with_evidence(
         self, run_id: str, claim_id: str, claim: str, features: ClaimFeatures
     ) -> VerificationEnvelope:
+        self._execution_evidence_ids = frozenset()
         try:
             evidence = await self.provider.search(
                 claim_id,
@@ -149,6 +155,7 @@ class SingleVerifier:
                 top_k=self.evidence_settings.single_top_k,
                 max_chars=self.evidence_settings.single_chars,
             )
+            self._execution_evidence_ids = frozenset(item.evidence_id for item in evidence)
             response = await self.llm.invoke(
                 run_id=run_id,
                 node="single",
@@ -212,6 +219,11 @@ class EvidenceWorker:
         self.llm = llm
         self.evidence_settings = evidence_settings
         self.generation = generation
+        self._execution_evidence_ids: frozenset[str] = frozenset()
+
+    @property
+    def execution_evidence_ids(self) -> frozenset[str]:
+        return self._execution_evidence_ids
 
     async def verify_task(self, run_id: str, claim_id: str, task: VerificationTask) -> WorkerResult:
         envelope = await self.verify_task_with_evidence(run_id, claim_id, task)
@@ -220,6 +232,7 @@ class EvidenceWorker:
     async def verify_task_with_evidence(
         self, run_id: str, claim_id: str, task: VerificationTask
     ) -> VerificationEnvelope:
+        self._execution_evidence_ids = frozenset()
         try:
             evidence = await self.provider.search(
                 claim_id,
@@ -227,6 +240,7 @@ class EvidenceWorker:
                 top_k=self.evidence_settings.worker_top_k,
                 max_chars=self.evidence_settings.worker_chars,
             )
+            self._execution_evidence_ids = frozenset(item.evidence_id for item in evidence)
             response = await self.llm.invoke(
                 run_id=run_id,
                 node="worker",

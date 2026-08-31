@@ -153,24 +153,13 @@ def make_route_node(components: GraphComponents):
 
 def make_single_node(components: GraphComponents):
     async def single(state: VerificationState) -> dict[str, Any]:
-        verify_with_evidence = getattr(components.single, "verify_with_evidence", None)
-        if verify_with_evidence is None:
-            result = await components.single.verify(
-                state["run_id"],
-                state["claim_id"],
-                state["claim_text"],
-                state["claim_features"],
-            )
-            evidence_ids = set()
-        else:
-            envelope = await verify_with_evidence(
-                state["run_id"],
-                state["claim_id"],
-                state["claim_text"],
-                state["claim_features"],
-            )
-            result = envelope.result
-            evidence_ids = set(envelope.evidence_ids)
+        result = await components.single.verify(
+            state["run_id"],
+            state["claim_id"],
+            state["claim_text"],
+            state["claim_features"],
+        )
+        evidence_ids = set(getattr(components.single, "execution_evidence_ids", ()))
         return {
             "draft_result": result,
             "draft_origin": "single",
@@ -193,18 +182,10 @@ def make_decompose_node(components: GraphComponents):
 
 def make_worker_node(components: GraphComponents):
     async def worker(payload: WorkerInput) -> dict[str, Any]:
-        verify_with_evidence = getattr(components.worker, "verify_task_with_evidence", None)
-        if verify_with_evidence is None:
-            result = await components.worker.verify_task(
-                payload["run_id"], payload["claim_id"], payload["task"]
-            )
-            evidence_ids = set()
-        else:
-            envelope = await verify_with_evidence(
-                payload["run_id"], payload["claim_id"], payload["task"]
-            )
-            result = envelope.result
-            evidence_ids = set(envelope.evidence_ids)
+        result = await components.worker.verify_task(
+            payload["run_id"], payload["claim_id"], payload["task"]
+        )
+        evidence_ids = set(getattr(components.worker, "execution_evidence_ids", ()))
         return {"worker_results": [result], "execution_evidence_ids": evidence_ids}
 
     return worker
