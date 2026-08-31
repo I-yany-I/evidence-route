@@ -211,14 +211,8 @@ def _build_repeat_snapshot(artifact: Any, repeat: int, run_store: Any) -> Repeat
     route_source, worker_count, transport_attempts, cache_hits = _run_store_accounting(
         artifact, run_store
     )
-    try:
-        urls = citation_urls(result)
-    except Exception:
-        urls = []
-    try:
-        citations_valid = citation_is_valid(result)
-    except Exception:
-        citations_valid = None
+    urls = citation_urls(result)
+    citations_valid = citation_is_valid(result)
     citation_evidence_ids = sorted(
         {
             citation.evidence_id.strip()
@@ -268,18 +262,13 @@ def _snapshot_values(snapshots: list[RepeatSnapshot], field: str) -> set[object]
     return {str(getattr(snapshot, field)) for snapshot in snapshots}
 
 
-def _provider_output_signature(artifact: Any) -> object:
-    if artifact is None:
-        return None
-    try:
-        result = artifact.result
-        return (
-            getattr(result, "rationale", None),
-            getattr(result, "confidence", None),
-            tuple(getattr(artifact, "response_model_ids_raw", [])),
-        )
-    except Exception:
-        return None
+def _provider_output_signature(artifact: RunArtifact) -> object:
+    result = artifact.result
+    return (
+        result.rationale,
+        result.confidence,
+        tuple(artifact.response_model_ids_raw),
+    )
 
 
 def _classify_repeats(
@@ -305,7 +294,7 @@ def _classify_repeats(
     provider_variance = False
     if verdict_drift and not deterministic_explanation:
         provider_signatures = {
-            _provider_output_signature(artifacts.get(repeat)) for repeat in range(3)
+            _provider_output_signature(artifacts[repeat]) for repeat in range(3)
         }
         provider_variance = len(provider_signatures) > 1
 

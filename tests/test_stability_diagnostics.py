@@ -536,3 +536,35 @@ def test_run_artifact_field_errors_are_not_silently_marked_invalid() -> None:
 
     with pytest.raises(AttributeError):
         _diagnostics({"claim": {0: malformed, 1: malformed, 2: malformed}})
+
+
+def test_constructed_artifact_with_invalid_citation_url_does_not_hide_value_error() -> None:
+    artifact = _artifact()
+    malformed_citation = Citation.model_construct(
+        evidence_id="e1",
+        claim_unit_ids=["u0"],
+        question="question",
+        answer="answer",
+        quote="quote",
+        stance="supports",
+        source_url=object(),
+    )
+    malformed_result = artifact.result.model_copy(update={"citations": [malformed_citation]})
+    payload = artifact.__dict__.copy()
+    payload["result"] = malformed_result
+    malformed = RunArtifact.model_construct(**payload)
+
+    with pytest.raises(ValueError, match="absolute"):
+        _diagnostics({"claim": {0: artifact, 1: malformed, 2: artifact}})
+
+
+def test_constructed_artifact_with_invalid_provider_fields_does_not_hide_type_error() -> None:
+    artifact = _artifact()
+    changed_result = artifact.result.model_copy(update={"verdict": Verdict.REFUTED})
+    payload = artifact.__dict__.copy()
+    payload["result"] = changed_result
+    payload["response_model_ids_raw"] = object()
+    malformed = RunArtifact.model_construct(**payload)
+
+    with pytest.raises(TypeError):
+        _diagnostics({"claim": {0: artifact, 1: malformed, 2: artifact}})
