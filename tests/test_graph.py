@@ -3,6 +3,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from evidence_route.config import EvidenceSettings
 from evidence_route.contracts import (
+    Citation,
     ResultStatus,
     RouteDecision,
     Strategy,
@@ -12,6 +13,8 @@ from evidence_route.contracts import (
     VerificationTask,
 )
 from evidence_route.graph import GraphComponents, build_graph, initial_state
+from evidence_route.validation import ResultValidator
+from evidence_route.verification import VerificationEnvelope
 
 
 class Provider:
@@ -33,13 +36,15 @@ class Router:
         )
 
 
-def result(claim_id="dev-0", route="single", escalated=False):
+def result(claim_id="dev-0", route="single", escalated=False, citations=None, available=None):
     return VerificationResult(
         claim_id=claim_id,
         status=ResultStatus.COMPLETED,
         verdict=Verdict.SUPPORTED,
         confidence=0.9,
         rationale="supported",
+        citations=citations or [],
+        available_evidence_ids=available or [],
         initial_route=route,
         escalated=escalated,
         usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2, complete=True),
@@ -49,6 +54,27 @@ def result(claim_id="dev-0", route="single", escalated=False):
 class Single:
     async def verify(self, run_id, claim_id, claim, features):
         return result(claim_id)
+
+
+class ForgedSingle(Single):
+    async def verify_with_evidence(self, run_id, claim_id, claim, features):
+        citation = Citation(
+            evidence_id="forged-evidence",
+            claim_unit_ids=["u0"],
+            question="q",
+            answer="a",
+            quote="q",
+            stance="supports",
+            source_url="https://example.org/source",
+        )
+        return VerificationEnvelope(
+            result=result(
+                claim_id,
+                citations=[citation],
+                available=["forged-evidence"],
+            ),
+            evidence_ids=frozenset(),
+        )
 
 
 class Decomposer:
@@ -105,6 +131,22 @@ def components(route="single", validator=None):
     )
 
 
+def forged_components():
+    values = components(validator=None)
+    return GraphComponents(
+        provider=values.provider,
+        router=values.router,
+        single=ForgedSingle(),
+        decomposer=values.decomposer,
+        worker=values.worker,
+        judge=values.judge,
+        validator=ResultValidator(low_confidence=0.0, minimum_coverage=0.0),
+        evidence_settings=values.evidence_settings,
+        run_store=values.run_store,
+        trace=values.trace,
+    )
+
+
 @pytest.mark.asyncio
 async def test_single_result_finishes_without_multi() -> None:
     graph = build_graph(components(), checkpointer=InMemorySaver())
@@ -137,3 +179,16 @@ async def test_single_escalation_preserves_initial_route() -> None:
     assert state["escalation_count"] == 1
     assert state["final_result"].initial_route == "single"
     assert state["final_result"].escalated is True
+
+
+@pytest.mark.asyncio
+async def test_validation_uses_execution_evidence_ids_not_forged_result_available_ids() -> None:
+    graph = build_graph(forged_components(), checkpointer=None)
+
+    state = await graph.ainvoke(
+        initial_state("run-forged", "dev-3", "Claim", Strategy.ALWAYS_SINGLE),
+        config={"configurable": {"thread_id": "run-forged"}},
+    )
+
+    assert state["final_result"].status is ResultStatus.FAILED
+    assert "UNKNOWN_EVIDENCE:forged-evidence" in state["final_result"].errors

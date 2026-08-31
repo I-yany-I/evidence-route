@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from evidence_route.artifacts import BillingStateError
@@ -47,6 +48,12 @@ def _canonicalize_citations(citations: list[Any]) -> list[Any]:
         )
         for citation in citations
     ]
+
+
+@dataclass(frozen=True)
+class VerificationEnvelope:
+    result: Any
+    evidence_ids: frozenset[str]
 
 
 def result_from_draft(
@@ -129,6 +136,12 @@ class SingleVerifier:
     async def verify(
         self, run_id: str, claim_id: str, claim: str, features: ClaimFeatures
     ) -> VerificationResult:
+        envelope = await self.verify_with_evidence(run_id, claim_id, claim, features)
+        return envelope.result
+
+    async def verify_with_evidence(
+        self, run_id: str, claim_id: str, claim: str, features: ClaimFeatures
+    ) -> VerificationEnvelope:
         try:
             evidence = await self.provider.search(
                 claim_id,
@@ -145,15 +158,21 @@ class SingleVerifier:
                 max_input_tokens=self.generation.single.max_input_tokens,
                 max_output_tokens=self.generation.single.max_output_tokens,
             )
-            return result_from_draft(response, claim_id, "single", evidence)
+            return VerificationEnvelope(
+                result=result_from_draft(response, claim_id, "single", evidence),
+                evidence_ids=frozenset(item.evidence_id for item in evidence),
+            )
         except Exception as exc:
             if _safety_stop(exc):
                 raise
-            return failed_result(
-                claim_id,
-                initial_route="single",
-                failure_stage="single",
-                error_code="SINGLE_VERIFICATION_FAILED",
+            return VerificationEnvelope(
+                result=failed_result(
+                    claim_id,
+                    initial_route="single",
+                    failure_stage="single",
+                    error_code="SINGLE_VERIFICATION_FAILED",
+                ),
+                evidence_ids=frozenset(),
             )
 
 
@@ -195,6 +214,12 @@ class EvidenceWorker:
         self.generation = generation
 
     async def verify_task(self, run_id: str, claim_id: str, task: VerificationTask) -> WorkerResult:
+        envelope = await self.verify_task_with_evidence(run_id, claim_id, task)
+        return envelope.result
+
+    async def verify_task_with_evidence(
+        self, run_id: str, claim_id: str, task: VerificationTask
+    ) -> VerificationEnvelope:
         try:
             evidence = await self.provider.search(
                 claim_id,
@@ -211,18 +236,24 @@ class EvidenceWorker:
                 max_input_tokens=self.generation.worker.max_input_tokens,
                 max_output_tokens=self.generation.worker.max_output_tokens,
             )
-            return worker_result_from_draft(response, task, evidence)
+            return VerificationEnvelope(
+                result=worker_result_from_draft(response, task, evidence),
+                evidence_ids=frozenset(item.evidence_id for item in evidence),
+            )
         except Exception as exc:
             if _safety_stop(exc):
                 raise
-            return WorkerResult(
-                task_id=task.task_id,
-                claim_unit_ids=task.claim_unit_ids,
-                status=ResultStatus.FAILED,
-                verdict=None,
-                confidence=None,
-                usage=Usage(input_tokens=0, output_tokens=0, total_tokens=0, complete=True),
-                errors=["WORKER_VERIFICATION_FAILED"],
+            return VerificationEnvelope(
+                result=WorkerResult(
+                    task_id=task.task_id,
+                    claim_unit_ids=task.claim_unit_ids,
+                    status=ResultStatus.FAILED,
+                    verdict=None,
+                    confidence=None,
+                    usage=Usage(input_tokens=0, output_tokens=0, total_tokens=0, complete=True),
+                    errors=["WORKER_VERIFICATION_FAILED"],
+                ),
+                evidence_ids=frozenset(),
             )
 
 

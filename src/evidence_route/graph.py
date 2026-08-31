@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import operator
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
@@ -42,6 +43,10 @@ class WorkerInput(TypedDict):
     task: VerificationTask
 
 
+class ExecutionVerificationState(VerificationState, total=False):
+    execution_evidence_ids: Annotated[set[str], operator.or_]
+
+
 def initial_state(
     run_id: str,
     claim_id: str,
@@ -58,6 +63,7 @@ def initial_state(
         "status": RunStatus.RUNNING,
         "escalation_count": 0,
         "escalated": False,
+        "execution_evidence_ids": set(),
         "worker_results": [],
         "usage": Usage(input_tokens=0, output_tokens=0, total_tokens=0, complete=True),
         "node_timings": [],
@@ -110,6 +116,7 @@ def make_analyze_node(components: GraphComponents):
             return {
                 "probe_evidence": evidence,
                 "claim_features": features,
+                "execution_evidence_ids": {item.evidence_id for item in evidence},
                 "node_timings": [_timing("analyze", started)],
             }
         except Exception as exc:
@@ -146,16 +153,29 @@ def make_route_node(components: GraphComponents):
 
 def make_single_node(components: GraphComponents):
     async def single(state: VerificationState) -> dict[str, Any]:
-        result = await components.single.verify(
-            state["run_id"],
-            state["claim_id"],
-            state["claim_text"],
-            state["claim_features"],
-        )
+        verify_with_evidence = getattr(components.single, "verify_with_evidence", None)
+        if verify_with_evidence is None:
+            result = await components.single.verify(
+                state["run_id"],
+                state["claim_id"],
+                state["claim_text"],
+                state["claim_features"],
+            )
+            evidence_ids = set()
+        else:
+            envelope = await verify_with_evidence(
+                state["run_id"],
+                state["claim_id"],
+                state["claim_text"],
+                state["claim_features"],
+            )
+            result = envelope.result
+            evidence_ids = set(envelope.evidence_ids)
         return {
             "draft_result": result,
             "draft_origin": "single",
             "usage": result.usage,
+            "execution_evidence_ids": evidence_ids,
         }
 
     return single
@@ -173,10 +193,19 @@ def make_decompose_node(components: GraphComponents):
 
 def make_worker_node(components: GraphComponents):
     async def worker(payload: WorkerInput) -> dict[str, Any]:
-        result = await components.worker.verify_task(
-            payload["run_id"], payload["claim_id"], payload["task"]
-        )
-        return {"worker_results": [result]}
+        verify_with_evidence = getattr(components.worker, "verify_task_with_evidence", None)
+        if verify_with_evidence is None:
+            result = await components.worker.verify_task(
+                payload["run_id"], payload["claim_id"], payload["task"]
+            )
+            evidence_ids = set()
+        else:
+            envelope = await verify_with_evidence(
+                payload["run_id"], payload["claim_id"], payload["task"]
+            )
+            result = envelope.result
+            evidence_ids = set(envelope.evidence_ids)
+        return {"worker_results": [result], "execution_evidence_ids": evidence_ids}
 
     return worker
 
@@ -192,7 +221,12 @@ def make_judge_node(components: GraphComponents):
             initial_route=initial_route,
             escalated=state.get("escalated", False),
         )
-        return {"draft_result": result, "draft_origin": "multi", "usage": result.usage}
+        return {
+            "draft_result": result,
+            "draft_origin": "multi",
+            "usage": result.usage,
+            "execution_evidence_ids": set(state.get("execution_evidence_ids", set())),
+        }
 
     return judge
 
@@ -200,7 +234,7 @@ def make_judge_node(components: GraphComponents):
 def make_validate_node(components: GraphComponents):
     async def validate(state: VerificationState) -> dict[str, Any]:
         result = state["draft_result"]
-        evidence_ids = set(result.available_evidence_ids)
+        evidence_ids = set(state.get("execution_evidence_ids", set()))
         decision = components.validator.validate(
             result=result,
             claim_unit_ids=[item.unit_id for item in state["claim_features"].claim_units],
@@ -236,7 +270,7 @@ def make_validate_node(components: GraphComponents):
 
 
 def build_graph(components: GraphComponents, *, checkpointer: Any):
-    builder = StateGraph(VerificationState)
+    builder = StateGraph(ExecutionVerificationState)
     builder.add_node("analyze", make_analyze_node(components))
     builder.add_node("route", make_route_node(components))
     builder.add_node("single", make_single_node(components))
