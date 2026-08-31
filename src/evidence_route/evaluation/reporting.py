@@ -45,6 +45,10 @@ from evidence_route.evaluation.official import run_official_evaluators, select_c
 from evidence_route.evaluation.runner import build_campaign_schedule
 from evidence_route.evaluation.runtime_manifest import load_runtime_manifest
 from evidence_route.evaluation.scorer_manifest import align_runtime_and_gold, load_gold_manifest
+from evidence_route.evaluation.stability import (
+    StabilityDiagnosticSummary,
+    build_stability_diagnostics,
+)
 from evidence_route.execution import load_price_config
 from evidence_route.llm import ensure_v1, make_call_id
 
@@ -99,6 +103,7 @@ class ReportBundle:
     representative_trace_sources: tuple[Path, ...]
     publication_gate: PublicationGateResult
     strict_publication_verified: bool = False
+    stability_diagnostics: StabilityDiagnosticSummary | None = None
 
     def write(self, output_dir: Path, *, readme: Path | None = None) -> None:
         output_dir = Path(output_dir)
@@ -112,6 +117,21 @@ class ReportBundle:
         output_dir.mkdir(parents=True, exist_ok=True)
         _write_json(output_dir / "summary.json", self.summary)
         _write_text(output_dir / "report.md", self.markdown)
+        stability_json = output_dir / "stability_diagnostics.json"
+        stability_markdown = output_dir / "stability_diagnostics.md"
+        if self.stability_diagnostics is not None:
+            _write_json(
+                stability_json,
+                self.stability_diagnostics.model_dump(mode="json"),
+            )
+            _write_text(
+                stability_markdown,
+                _render_stability_diagnostics_markdown(self.stability_diagnostics),
+            )
+        else:
+            for path in (stability_json, stability_markdown):
+                if path.exists():
+                    path.unlink()
         resume_path = output_dir / "resume_snippet.md"
         if self.resume_snippet is not None:
             _write_text(resume_path, self.resume_snippet)
@@ -144,6 +164,52 @@ def _write_text(path: Path, text: str) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(text, encoding="utf-8", newline="\n")
     temporary.replace(path)
+
+
+def _diagnostic_cell(value: str | None) -> str:
+    return value if value is not None else ""
+
+
+def _render_stability_diagnostics_markdown(
+    diagnostics: StabilityDiagnosticSummary,
+) -> str:
+    headers = (
+        "claim_id",
+        "primary_category",
+        "categories",
+        "repeat_0_status/verdict",
+        "repeat_1_status/verdict",
+        "repeat_2_status/verdict",
+    )
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for record in sorted(diagnostics.records, key=lambda item: item.claim_id):
+        repeats = {repeat.repeat: repeat for repeat in record.repeats}
+        repeat_values = []
+        for repeat in range(3):
+            snapshot = repeats[repeat]
+            status = _diagnostic_cell(snapshot.status)
+            verdict = _diagnostic_cell(snapshot.verdict)
+            repeat_values.append(f"{status} / {verdict}" if status or verdict else "")
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    record.claim_id,
+                    _diagnostic_cell(
+                        record.primary_category.value
+                        if record.primary_category is not None
+                        else None
+                    ),
+                    ", ".join(category.value for category in record.categories),
+                    *repeat_values,
+                )
+            )
+            + " |"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _sha256(path: Path) -> str:
@@ -1440,6 +1506,45 @@ def _representative_sources(
     return tuple(selected)
 
 
+def _open_stability_run_store(
+    report_input: ReportInput,
+    *,
+    activity: ActivityRecord,
+    plan: CampaignPlan,
+) -> SQLiteRunStore | None:
+    try:
+        store_path = _evidence_path(
+            report_input.run_store,
+            Path(report_input.repository_root) / "artifacts/gate-a-run-store.sqlite3",
+        )
+        pricing_path = _evidence_path(
+            report_input.pricing,
+            Path(report_input.repository_root) / "configs/pricing.local.yaml",
+        )
+        return SQLiteRunStore.open_existing(
+            store_path,
+            activity_id=activity.activity_id,
+            cap_cny=plan.cap_micro_cny / 1_000_000,
+            pricing=load_price_config(pricing_path),
+        )
+    except Exception:
+        return None
+
+
+def _stability_repeat_runs(
+    plan: CampaignPlan,
+    artifacts: dict[str, RunArtifact],
+) -> dict[str, dict[int, RunArtifact | None]]:
+    by_claim: dict[str, dict[int, RunArtifact | None]] = {
+        link.claim_id: {0: artifacts.get(link.dev_adaptive_run_id), 1: None, 2: None}
+        for link in plan.stability_repeat_zero_links
+    }
+    for work in plan.schedule:
+        if work.phase == "stability" and work.claim_id in by_claim:
+            by_claim[work.claim_id][work.repeat] = artifacts.get(work.run_id)
+    return by_claim
+
+
 def _render_markdown(summary: dict[str, object]) -> str:
     strategies = summary["strategies"]
     lines = [
@@ -1549,6 +1654,7 @@ def build_report_bundle(
     report_input: ReportInput,
     *,
     publish: bool = False,
+    stability_diagnostics: bool = False,
 ) -> ReportBundle:
     if publish:
         # Offline fixtures may relax these switches for diagnostic regeneration.  A publish
@@ -1624,6 +1730,18 @@ def build_report_bundle(
         if stability_runs
         else {"total": 0, "consistent": 0, "rate": 0.0, "wilson_low": 0.0, "wilson_high": 0.0}
     )
+    diagnostic_summary = None
+    if stability_diagnostics:
+        diagnostic_summary = build_stability_diagnostics(
+            activity_id=activity.activity_id,
+            campaign_id=plan.campaign_id,
+            repeat_runs=_stability_repeat_runs(plan, artifacts),
+            run_store=_open_stability_run_store(
+                report_input,
+                activity=activity,
+                plan=plan,
+            ),
+        )
     gate = _publication_gate(
         report_input,
         activity,
@@ -1700,6 +1818,7 @@ def build_report_bundle(
         representative_trace_sources=sources,
         publication_gate=gate,
         strict_publication_verified=publish and gate.publishable,
+        stability_diagnostics=diagnostic_summary,
     )
 
 

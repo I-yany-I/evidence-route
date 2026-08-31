@@ -342,6 +342,7 @@ class ProductionServices:
         activity_dir = _resolve_from(repository_root, kwargs["activity_dir"])
         output_dir = _resolve_from(repository_root, kwargs["output_dir"])
         publish = bool(kwargs["publish"])
+        stability_diagnostics = bool(kwargs.get("stability_diagnostics", False))
         readme_value = kwargs.get("readme")
         bundle = build_report_bundle(
             ReportInput(
@@ -367,6 +368,7 @@ class ProductionServices:
                 requirements_lock=_resolve_from(repository_root, kwargs["requirements_lock"]),
             ),
             publish=publish,
+            stability_diagnostics=stability_diagnostics,
         )
         bundle.write(
             output_dir,
@@ -378,6 +380,11 @@ class ProductionServices:
             "publishable": bundle.publication_gate.publishable,
             "output_dir": str(output_dir),
             "summary": str(output_dir / "summary.json"),
+            "stability_diagnostics": (
+                str(output_dir / "stability_diagnostics.json")
+                if getattr(bundle, "stability_diagnostics", None) is not None
+                else None
+            ),
         }
 
 
@@ -505,6 +512,7 @@ def create_app(services: CliServices) -> typer.Typer:
         start_after_calibration: Annotated[bool, typer.Option("--start-after-calibration")] = False,
         resume: Annotated[bool, typer.Option("--resume")] = False,
         accept_paid_campaign: Annotated[bool, typer.Option("--accept-paid-campaign")] = False,
+        max_items: Annotated[int, typer.Option("--max-items")] = 10,
     ) -> None:
         common = {
             "manifest": manifest,
@@ -518,6 +526,7 @@ def create_app(services: CliServices) -> typer.Typer:
             "run_store": run_store,
             "activity_id": activity_id,
             "campaign_id": campaign_id,
+            "max_items": max_items,
         }
         try:
             if not accept_paid_campaign:
@@ -566,6 +575,7 @@ def create_app(services: CliServices) -> typer.Typer:
         replay: Annotated[bool, typer.Option("--replay")] = False,
         gold_manifest: Annotated[Path | None, typer.Option("--gold-manifest")] = None,
         accept_paid_campaign: Annotated[bool, typer.Option("--accept-paid-campaign")] = False,
+        max_cases: Annotated[int, typer.Option("--max-cases")] = 4,
     ) -> None:
         if collect == replay:
             typer.echo("choose exactly one of --collect or --replay", err=True)
@@ -582,6 +592,7 @@ def create_app(services: CliServices) -> typer.Typer:
             "output_config": output_config,
             "output_report": output_report,
             "resume": resume,
+            "max_cases": max_cases,
         }
         try:
             if replay:
@@ -641,6 +652,9 @@ def create_app(services: CliServices) -> typer.Typer:
             "data/external/nltk"
         ),
         publish: Annotated[bool, typer.Option("--publish")] = False,
+        stability_diagnostics: Annotated[
+            bool, typer.Option("--stability-diagnostics")
+        ] = False,
         readme: Annotated[Path | None, typer.Option("--readme")] = None,
     ) -> None:
         if readme is not None and not publish:
@@ -664,6 +678,7 @@ def create_app(services: CliServices) -> typer.Typer:
                 requirements_lock=requirements_lock,
                 nltk_data_root=nltk_data_root,
                 publish=publish,
+                stability_diagnostics=stability_diagnostics,
                 readme=readme,
             )
         except Exception as exc:

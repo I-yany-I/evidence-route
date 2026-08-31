@@ -14,8 +14,11 @@ class FakeServices(CliServices):
         self.preview_calls = 0
         self.evaluate_calls = 0
         self.collect_calls = 0
+        self.last_evaluate = {}
+        self.last_collect = {}
         self.replay_calls = 0
         self.report_calls = 0
+        self.report_kwargs = None
 
     def verify(self, **kwargs):
         self.verify_calls += 1
@@ -54,10 +57,12 @@ class FakeServices(CliServices):
 
     def evaluate(self, **kwargs):
         self.evaluate_calls += 1
+        self.last_evaluate = kwargs
         return {"status": "complete", "mode": kwargs["mode"]}
 
     def calibrate_collect(self, **kwargs):
         self.collect_calls += 1
+        self.last_collect = kwargs
         return {"status": "complete"}
 
     def calibrate_replay(self, **kwargs):
@@ -66,6 +71,7 @@ class FakeServices(CliServices):
 
     def report(self, **kwargs):
         self.report_calls += 1
+        self.report_kwargs = kwargs
         return {"publishable": kwargs["publish"], "output_dir": str(kwargs["output_dir"])}
 
 
@@ -159,6 +165,54 @@ def test_evaluate_defaults_to_budget_preview_without_network(tmp_path: Path) -> 
     assert '"base_call_upper_bound": 1544' in result.output
     assert services.preview_calls == 1
     assert services.evaluate_calls == 0
+
+
+def test_paid_evaluate_forwards_batch_limit(tmp_path: Path) -> None:
+    services = FakeServices()
+    result = CliRunner().invoke(
+        create_app(services),
+        [
+            "evaluate",
+            "--manifest",
+            str(tmp_path / "dev.json"),
+            "--stability-manifest",
+            str(tmp_path / "stability.json"),
+            "--activity-dir",
+            str(tmp_path / "activity"),
+            "--calibration-report",
+            str(tmp_path / "calibration-report.json"),
+            "--accept-paid-campaign",
+            "--start-after-calibration",
+            "--max-items",
+            "3",
+        ],
+    )
+    assert result.exit_code == 0
+    assert services.evaluate_calls == 1
+    assert services.last_evaluate["max_items"] == 3
+
+
+def test_calibrate_forwards_default_and_explicit_case_limits(tmp_path: Path) -> None:
+    services = FakeServices()
+    base = [
+        "calibrate",
+        "--runtime-manifest",
+        str(tmp_path / "runtime.json"),
+        "--activity-dir",
+        str(tmp_path / "activity"),
+        "--output-config",
+        str(tmp_path / "calibrated.yaml"),
+        "--output-report",
+        str(tmp_path / "calibration.json"),
+        "--collect",
+        "--accept-paid-campaign",
+    ]
+    assert CliRunner().invoke(create_app(services), base).exit_code == 0
+    assert services.last_collect["max_cases"] == 4
+
+    explicit = CliRunner().invoke(create_app(services), [*base, "--max-cases", "2"])
+    assert explicit.exit_code == 0
+    assert services.last_collect["max_cases"] == 2
 
 
 def test_production_preview_does_not_construct_transport() -> None:
@@ -288,8 +342,31 @@ def test_report_forwards_explicit_publication_evidence_paths(tmp_path: Path) -> 
 
     assert result.exit_code == 0
     assert services.report_kwargs is not None
+    assert services.report_kwargs["stability_diagnostics"] is False
     for option, path in paths.items():
         assert services.report_kwargs[option.replace("-", "_")] == path
+
+
+def test_report_forwards_stability_diagnostics_flag(tmp_path: Path) -> None:
+    services = FakeServices()
+    result = CliRunner().invoke(
+        create_app(services),
+        [
+            "report",
+            "--activity-dir",
+            str(tmp_path / "activity"),
+            "--gold-manifest",
+            str(tmp_path / "gold.json"),
+            "--output-dir",
+            str(tmp_path / "report"),
+            "--stability-diagnostics",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert services.report_calls == 1
+    assert services.report_kwargs is not None
+    assert services.report_kwargs["stability_diagnostics"] is True
 
 
 def test_production_report_resolves_relative_paths_from_repository_root(
@@ -309,9 +386,10 @@ def test_production_report_resolves_relative_paths_from_repository_root(
             captured["output_dir"] = output_dir
             captured["readme"] = readme
 
-    def fake_build_report_bundle(report_input, *, publish=False):
+    def fake_build_report_bundle(report_input, *, publish=False, stability_diagnostics=False):
         captured["report_input"] = report_input
         captured["publish"] = publish
+        captured["stability_diagnostics"] = stability_diagnostics
         return Bundle()
 
     monkeypatch.setattr("evidence_route.cli.build_report_bundle", fake_build_report_bundle)
@@ -345,3 +423,4 @@ def test_production_report_resolves_relative_paths_from_repository_root(
     assert report_input.run_store == (repository_root / "artifacts/gate-a.sqlite3").resolve()
     assert captured["output_dir"] == (repository_root / "reports/incomplete/gate-a").resolve()
     assert captured["readme"] == (repository_root / "README.md").resolve()
+    assert captured["stability_diagnostics"] is False

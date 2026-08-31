@@ -2,6 +2,7 @@ import hashlib
 import json
 import sqlite3
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ from evidence_route.evaluation.reporting import (
     PublicationGateResult,
     build_report_bundle,
 )
+from evidence_route.evaluation.stability import StabilityCategory
 from evidence_route.llm import make_call_id
 
 pytest_plugins = ["tests.fixtures.evaluation.report_factory"]
@@ -488,6 +490,95 @@ def test_report_regeneration_is_byte_identical(complete_report_input, tmp_path: 
     second.write(second_dir)
     for name in ("summary.json", "report.md", "resume_snippet.md"):
         assert (first_dir / name).read_bytes() == (second_dir / name).read_bytes()
+
+
+def test_report_without_stability_diagnostics_removes_stale_files(
+    complete_report_input, tmp_path: Path
+) -> None:
+    output_dir = tmp_path / "default"
+    output_dir.mkdir()
+    (output_dir / "stability_diagnostics.json").write_bytes(b"stale\n")
+    (output_dir / "stability_diagnostics.md").write_bytes(b"stale\n")
+
+    bundle = build_report_bundle(complete_report_input)
+    bundle.write(output_dir)
+
+    assert bundle.stability_diagnostics is None
+    assert not (output_dir / "stability_diagnostics.json").exists()
+    assert not (output_dir / "stability_diagnostics.md").exists()
+
+
+def test_stability_diagnostics_are_provider_free_and_byte_deterministic(
+    complete_report_input, tmp_path: Path, monkeypatch
+) -> None:
+    def fail_official(*args, **kwargs):
+        raise AssertionError("stability diagnostics must not call an official evaluator")
+
+    monkeypatch.setattr(reporting, "run_official_evaluators", fail_official)
+    first = build_report_bundle(complete_report_input, stability_diagnostics=True)
+    second = build_report_bundle(complete_report_input, stability_diagnostics=True)
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first.write(first_dir)
+    second.write(second_dir)
+
+    assert first.stability_diagnostics is not None
+    assert first.stability_diagnostics.records == sorted(
+        first.stability_diagnostics.records, key=lambda record: record.claim_id
+    )
+    assert first.stability_diagnostics.claim_count == 20
+    assert all(len(record.repeats) == 3 for record in first.stability_diagnostics.records)
+    assert json.loads(
+        (first_dir / "stability_diagnostics.json").read_text(encoding="utf-8")
+    ) == first.stability_diagnostics.model_dump(mode="json")
+    assert (
+        first_dir / "stability_diagnostics.md"
+    ).read_text(encoding="utf-8").splitlines()[0] == (
+        "| claim_id | primary_category | categories | repeat_0_status/verdict | "
+        "repeat_1_status/verdict | repeat_2_status/verdict |"
+    )
+    for name in (
+        "summary.json",
+        "report.md",
+        "stability_diagnostics.json",
+        "stability_diagnostics.md",
+    ):
+        assert (first_dir / name).read_bytes() == (second_dir / name).read_bytes()
+
+
+def test_stability_diagnostics_preserve_missing_repeat_and_bad_ledger(
+    complete_report_input, tmp_path: Path, monkeypatch
+) -> None:
+    invalid_input = replace(complete_report_input, run_store=tmp_path / "missing.sqlite3")
+    bundle = build_report_bundle(invalid_input, stability_diagnostics=True)
+
+    assert bundle.stability_diagnostics is not None
+    record = bundle.stability_diagnostics.records[0]
+    assert record.primary_category is None
+    assert all(snapshot.transport_attempts is None for snapshot in record.repeats)
+
+    original_load = reporting._load_artifacts
+    missing_run_id = next(
+        item.run_id
+        for item in reporting._load_models(complete_report_input)[1].schedule
+        if item.phase == "stability" and item.repeat == 2
+    )
+
+    def load_without_one_repeat(activity_dir, plan, state):
+        artifacts, paths = original_load(activity_dir, plan, state)
+        artifacts.pop(missing_run_id, None)
+        paths.pop(missing_run_id, None)
+        return artifacts, paths
+
+    monkeypatch.setattr(reporting, "_load_artifacts", load_without_one_repeat)
+    bundle = build_report_bundle(complete_report_input, stability_diagnostics=True)
+
+    assert bundle.stability_diagnostics is not None
+    assert bundle.stability_diagnostics.records[0].repeats[2].valid is False
+    assert (
+        bundle.stability_diagnostics.records[0].primary_category
+        is StabilityCategory.INCOMPLETE_OR_FAILED
+    )
 
 
 def test_missing_calibration_case_blocks_publication(report_input_factory) -> None:
