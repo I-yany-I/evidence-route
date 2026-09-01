@@ -184,6 +184,7 @@ class ProductionCampaignService:
         plan: Any,
         config_path: Path,
         report_path: Path,
+        baseline_config_path: Path | None = None,
     ) -> None:
         metadata_path = activity_dir / "calibration-replay.json"
         if not metadata_path.is_file():
@@ -193,7 +194,8 @@ class ProductionCampaignService:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if metadata.get("plan_fingerprint") != plan.plan_fingerprint:
             raise ValueError("calibration replay belongs to a different plan")
-        if metadata.get("calibrated_config_sha256") != sha256_file(config_path):
+        calibrated_config = baseline_config_path or config_path
+        if metadata.get("calibrated_config_sha256") != sha256_file(calibrated_config):
             raise ValueError("calibrated config differs from replay metadata")
         if metadata.get("calibration_report_sha256") != sha256_file(report_path):
             raise ValueError("calibration report differs from replay metadata")
@@ -548,26 +550,39 @@ class ProductionCampaignService:
         campaign_id = str(kwargs["campaign_id"])
         parent_activity_value = kwargs.get("parent_activity")
         parent_report_value = kwargs.get("parent_report")
+        parent_config_value = kwargs.get("parent_config")
         experiment_dir_value = kwargs.get("experiment_dir")
         experiment_mode = any(
             value is not None
-            for value in (parent_activity_value, parent_report_value, experiment_dir_value)
+            for value in (
+                parent_activity_value,
+                parent_report_value,
+                parent_config_value,
+                experiment_dir_value,
+            )
         )
         if experiment_mode and not all(
             value is not None
-            for value in (parent_activity_value, parent_report_value, experiment_dir_value)
+            for value in (
+                parent_activity_value,
+                parent_report_value,
+                parent_config_value,
+                experiment_dir_value,
+            )
         ):
             raise ValueError(
-                "experiment mode requires --parent-activity, --parent-report, and "
-                "--experiment-dir"
+                "experiment mode requires --parent-activity, --parent-report, "
+                "--parent-config, and --experiment-dir"
             )
         parent_activity = str(parent_activity_value) if parent_activity_value is not None else None
         parent_report = Path(parent_report_value) if parent_report_value is not None else None
+        parent_config = Path(parent_config_value) if parent_config_value is not None else None
         experiment_dir = Path(experiment_dir_value) if experiment_dir_value is not None else None
         if experiment_mode:
             assert (
                 parent_activity is not None
                 and parent_report is not None
+                and parent_config is not None
                 and experiment_dir is not None
             )
             if parent_activity == activity_id:
@@ -637,6 +652,7 @@ class ProductionCampaignService:
             calibration_plan,
             config_path,
             _require_file(calibration_report, "calibration report"),
+            baseline_config_path=parent_config if experiment_mode else None,
         )
         replay_metadata_path = activity_dir / "calibration-replay.json"
         _require_file(replay_metadata_path, "calibration replay metadata")
@@ -665,6 +681,7 @@ class ProductionCampaignService:
             assert (
                 parent_activity is not None
                 and parent_report is not None
+                and parent_config is not None
                 and experiment_dir is not None
             )
             if mode == "resume":
@@ -682,6 +699,7 @@ class ProductionCampaignService:
                     parent_report=parent_report,
                     parent_manifest=manifest_path,
                     pricing=pricing_path,
+                    parent_config=parent_config,
                     config=config_path,
                     prompt=self.repository_root / "src" / "evidence_route" / "prompts.py",
                     stability_manifest=stability_path,
@@ -812,6 +830,7 @@ class ProductionCampaignService:
                 assert (
                     parent_activity is not None
                     and parent_report is not None
+                    and parent_config is not None
                     and experiment_dir is not None
                 )
                 experiment_identity = create_experiment_identity(
@@ -822,6 +841,7 @@ class ProductionCampaignService:
                     parent_report=parent_report,
                     parent_manifest=manifest_path,
                     pricing=pricing_path,
+                    parent_config=parent_config,
                     config=config_path,
                     prompt=self.repository_root / "src" / "evidence_route" / "prompts.py",
                     stability_manifest=stability_path,

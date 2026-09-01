@@ -72,6 +72,122 @@ def test_create_experiment_identity_persists_parent_hashes_and_schedule(tmp_path
     assert (tmp_path / "experiment" / "experiment.json").is_file()
 
 
+def test_create_experiment_identity_uses_prompt_hash_from_parent_report(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    parent_prompt_hash = "a" * 64
+    inputs["report"].write_text(
+        json.dumps(
+            {
+                "activity_id": "gate-a",
+                "campaign_id": "gate-a-dev",
+                "reproducibility": {"prompt_bundle_sha256": parent_prompt_hash},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    identity = create_experiment_identity(
+        experiment_id="stability-hardening-20260901",
+        activity_id="stability-hardening-20260901",
+        campaign_id="stability-hardening-20260901",
+        parent_activity_id="gate-a",
+        parent_report=inputs["report"],
+        parent_manifest=inputs["manifest"],
+        pricing=inputs["pricing"],
+        config=inputs["config"],
+        prompt=inputs["prompt"],
+        stability_manifest=inputs["stability"],
+        repeat_schedule={"claim-a": [0, 1, 2]},
+        requested_alias="gpt-5.6-sol",
+        response_model_id="gpt-5.6-sol",
+        identity_verified=False,
+        output_dir=tmp_path / "experiment",
+    )
+
+    assert identity.parent_prompt_sha256 == parent_prompt_hash
+    assert identity.prompt_sha256 == sha256_file(inputs["prompt"])
+
+
+def test_create_experiment_identity_separates_parent_and_experiment_config(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+    parent_config = _write(tmp_path / "parent-config.yaml", "llm: {model: baseline}\n")
+    inputs["config"].write_text("llm: {model: hardened}\n", encoding="utf-8")
+
+    identity = create_experiment_identity(
+        experiment_id="stability-hardening-20260901",
+        activity_id="stability-hardening-20260901",
+        campaign_id="stability-hardening-20260901",
+        parent_activity_id="gate-a",
+        parent_report=inputs["report"],
+        parent_manifest=inputs["manifest"],
+        pricing=inputs["pricing"],
+        parent_config=parent_config,
+        config=inputs["config"],
+        prompt=inputs["prompt"],
+        stability_manifest=inputs["stability"],
+        repeat_schedule={"claim-a": [0, 1, 2]},
+        requested_alias="gpt-5.6-sol",
+        response_model_id="gpt-5.6-sol",
+        identity_verified=False,
+        output_dir=tmp_path / "experiment",
+    )
+
+    assert identity.parent_config_sha256 == sha256_file(parent_config)
+    assert identity.config_sha256 == sha256_file(inputs["config"])
+
+
+def test_validate_parent_baseline_checks_parent_and_experiment_config(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+    parent_config = _write(tmp_path / "parent-config.yaml", "llm: {model: baseline}\n")
+    inputs["config"].write_text("llm: {model: hardened}\n", encoding="utf-8")
+    identity = create_experiment_identity(
+        experiment_id="stability-hardening-20260901",
+        activity_id="stability-hardening-20260901",
+        campaign_id="stability-hardening-20260901",
+        parent_activity_id="gate-a",
+        parent_report=inputs["report"],
+        parent_manifest=inputs["manifest"],
+        pricing=inputs["pricing"],
+        parent_config=parent_config,
+        config=inputs["config"],
+        prompt=inputs["prompt"],
+        stability_manifest=inputs["stability"],
+        repeat_schedule={"claim-a": [0, 1, 2]},
+        requested_alias="gpt-5.6-sol",
+        response_model_id="gpt-5.6-sol",
+        identity_verified=False,
+        output_dir=tmp_path / "experiment",
+    )
+
+    validate_parent_baseline(
+        identity,
+        parent_report=inputs["report"],
+        parent_manifest=inputs["manifest"],
+        pricing=inputs["pricing"],
+        parent_config=parent_config,
+        config=inputs["config"],
+        prompt=inputs["prompt"],
+        stability_manifest=inputs["stability"],
+    )
+
+    parent_config.write_text("llm: {model: changed}\n", encoding="utf-8")
+    with pytest.raises(FreezeMismatch):
+        validate_parent_baseline(
+            identity,
+            parent_report=inputs["report"],
+            parent_manifest=inputs["manifest"],
+            pricing=inputs["pricing"],
+            parent_config=parent_config,
+            config=inputs["config"],
+            prompt=inputs["prompt"],
+            stability_manifest=inputs["stability"],
+        )
+
+
 @pytest.mark.parametrize(
     "key", ["report", "manifest", "pricing", "config", "prompt", "stability"]
 )

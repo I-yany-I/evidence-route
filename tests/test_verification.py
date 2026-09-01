@@ -53,8 +53,10 @@ class Provider:
 class LLM:
     def __init__(self, value):
         self.value = value
+        self.messages = []
 
     async def invoke(self, **kwargs):
+        self.messages.append(kwargs["messages"])
         return type(
             "Response",
             (),
@@ -96,6 +98,41 @@ async def test_single_verifier_returns_structured_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_hardened_single_verifier_uses_hardened_prompt() -> None:
+    draft = type(
+        "Draft",
+        (),
+        {
+            "verdict": Verdict.NOT_ENOUGH_EVIDENCE,
+            "confidence": 0.9,
+            "rationale": "insufficient",
+            "citations": [],
+        },
+    )()
+    llm = LLM(draft)
+    verifier = SingleVerifier(
+        Provider(), llm, EvidenceSettings(), GenerationSettings(), hardened=True
+    )
+
+    await verifier.verify_with_evidence("run", "dev-0", "claim", features())
+
+    assert "full literal claim" in llm.messages[0][0]["content"]
+
+
+def multi_features() -> ClaimFeatures:
+    return features().model_copy(
+        update={
+            "claim_units": [
+                ClaimUnit(unit_id="u0", text="first atomic claim"),
+                ClaimUnit(unit_id="u1", text="second atomic claim"),
+                ClaimUnit(unit_id="u2", text="third atomic claim"),
+            ],
+            "atomic_clause_count": 3,
+        }
+    )
+
+
+@pytest.mark.asyncio
 async def test_decomposer_rejects_unknown_unit_reference() -> None:
     draft = DecompositionDraft(
         tasks=[VerificationTask(task_id="t0", claim_unit_ids=["u9"], query="bad")]
@@ -104,6 +141,27 @@ async def test_decomposer_rejects_unknown_unit_reference() -> None:
         await ClaimDecomposer(LLM(draft), GenerationSettings()).decompose(
             "run", "claim", features()
         )
+
+
+@pytest.mark.asyncio
+async def test_deterministic_decomposer_uses_claim_units_in_order() -> None:
+    decomposer = ClaimDecomposer(
+        LLM(
+            DecompositionDraft(
+                tasks=[VerificationTask(task_id="t0", claim_unit_ids=["u0"], query="unused")]
+            )
+        ),
+        GenerationSettings(),
+        deterministic=True,
+    )
+
+    tasks = await decomposer.decompose("run", "claim", multi_features())
+
+    assert tasks == [
+        VerificationTask(task_id="t0", claim_unit_ids=["u0"], query="first atomic claim"),
+        VerificationTask(task_id="t1", claim_unit_ids=["u1"], query="second atomic claim"),
+        VerificationTask(task_id="t2", claim_unit_ids=["u2"], query="third atomic claim"),
+    ]
 
 
 @pytest.mark.asyncio

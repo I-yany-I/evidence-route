@@ -212,6 +212,8 @@ def test_paid_evaluate_forwards_isolated_experiment_identity(tmp_path: Path) -> 
             "gate-a-20260830",
             "--parent-report",
             str(tmp_path / "parent-report.json"),
+            "--parent-config",
+            str(tmp_path / "parent-config.yaml"),
             "--experiment-dir",
             str(tmp_path / "experiment"),
         ],
@@ -220,6 +222,7 @@ def test_paid_evaluate_forwards_isolated_experiment_identity(tmp_path: Path) -> 
     assert result.exit_code == 0
     assert services.last_evaluate["parent_activity"] == "gate-a-20260830"
     assert services.last_evaluate["parent_report"] == tmp_path / "parent-report.json"
+    assert services.last_evaluate["parent_config"] == tmp_path / "parent-config.yaml"
     assert services.last_evaluate["experiment_dir"] == tmp_path / "experiment"
 
 

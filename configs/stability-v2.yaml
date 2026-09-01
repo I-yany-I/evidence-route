@@ -1,0 +1,37 @@
+llm:
+  temperature: 0.0
+  timeout_s: 90.0
+  transient_retries: 2
+  structured_mode: json_object
+routing:
+  clear_multi_clauses: 3
+  clear_single_min_sources: 2
+  low_confidence: 0.65
+  minimum_coverage: 1.0
+hardening:
+  deterministic_ambiguous: true
+  deterministic_decomposition: true
+  hardened_judge: true
+  adjudication: true
+evidence:
+  probe_top_k: 3
+  probe_chars: 450
+  single_top_k: 8
+  single_chars: 800
+  worker_top_k: 5
+  worker_chars: 800
+  judge_max_evidence: 12
+  judge_chars: 600
+generation:
+  router: {max_input_tokens: 1800, max_output_tokens: 250}
+  single: {max_input_tokens: 6500, max_output_tokens: 1000}
+  decomposer: {max_input_tokens: 2500, max_output_tokens: 500}
+  worker: {max_input_tokens: 5000, max_output_tokens: 800}
+  judge: {max_input_tokens: 8000, max_output_tokens: 1200}
+  max_workers: 3
+  max_escalations: 1
+  max_transport_attempts: 3
+  max_repairs_per_node: 1
+budget:
+  estimated_cost_cap_cny: 700.0
+  reserve_ratio: 0.2

@@ -13,6 +13,13 @@ SYSTEM_PROMPT = (
     "return JSON only, and provide a concise rationale without hidden reasoning."
 )
 SINGLE_PROMPT = SYSTEM_PROMPT + " Verify the claim against the retrieved evidence."
+HARDENED_SINGLE_PROMPT = (
+    SINGLE_PROMPT
+    + " Verify the full literal claim, including every clause, number, time scope, and comparison."
+    + " Evidence that only reports that someone made the claim does not establish the claim itself"
+    + " unless the claim is explicitly about that report or quotation."
+    + " If only part of the claim is supported, return Not Enough Evidence."
+)
 DECOMPOSER_PROMPT = SYSTEM_PROMPT + " Decompose the claim into one to three atomic tasks."
 WORKER_PROMPT = SYSTEM_PROMPT + " Answer the assigned verification task."
 JUDGE_PROMPT = SYSTEM_PROMPT + " Judge the worker records and deduplicate their citations."
@@ -44,7 +51,7 @@ def hardened_prompt_hash() -> str:
     values = [
         HARDENED_PROMPT_VERSION,
         SYSTEM_PROMPT,
-        SINGLE_PROMPT,
+        HARDENED_SINGLE_PROMPT,
         DECOMPOSER_PROMPT,
         WORKER_PROMPT,
         HARDENED_JUDGE_PROMPT,
@@ -128,6 +135,13 @@ def _judge_messages(
             ),
         },
     ]
+
+
+def hardened_single_messages(
+    claim: str, features: ClaimFeatures, evidence: list[Evidence]
+) -> list[dict[str, str]]:
+    messages = single_messages(claim, features, evidence)
+    return [{"role": "system", "content": HARDENED_SINGLE_PROMPT}, messages[1]]
 
 
 def judge_messages(claim: str, workers: list[WorkerResult]) -> list[dict[str, str]]:

@@ -1,7 +1,10 @@
+import pytest
+
 from evidence_route.contracts import Citation, ResultStatus, Usage, Verdict, VerificationResult
 from evidence_route.validation import (
     ResultValidator,
     ValidationAction,
+    adjudicate_verification_results,
     normalize_verification_result,
 )
 
@@ -94,6 +97,63 @@ def test_normalize_verification_result_cleans_structured_fields() -> None:
     assert normalized.available_evidence_ids == ["e1", "e2"]
     assert normalized.verdict is Verdict.SUPPORTED
 
+
+def result_with(verdict: Verdict, evidence_id: str) -> VerificationResult:
+    citation = Citation(
+        evidence_id=evidence_id,
+        claim_unit_ids=["u0"],
+        question="q",
+        answer="a",
+        quote="quote",
+        stance="supports" if verdict is Verdict.SUPPORTED else "insufficient",
+        source_url=f"https://example.org/{evidence_id}",
+    )
+    return valid_result().model_copy(
+        update={
+            "verdict": verdict,
+            "citations": [citation],
+            "available_evidence_ids": [evidence_id],
+            "rationale": f"candidate {evidence_id}",
+        }
+    )
+
+
+def test_adjudication_is_order_independent_and_conservative_for_insufficient_evidence() -> None:
+    supported = result_with(Verdict.SUPPORTED, "e2")
+    insufficient = result_with(Verdict.NOT_ENOUGH_EVIDENCE, "e1")
+
+    first = adjudicate_verification_results([supported, insufficient])
+    second = adjudicate_verification_results([insufficient, supported])
+
+    assert first == second
+    assert first.verdict is Verdict.NOT_ENOUGH_EVIDENCE
+    assert [citation.evidence_id for citation in first.citations] == ["e1"]
+    assert first.errors == ["ADJUDICATED_DISAGREEMENT"]
+
+
+def test_adjudication_maps_direct_support_refute_disagreement_to_conflicting() -> None:
+    result = adjudicate_verification_results(
+        [result_with(Verdict.SUPPORTED, "e2"), result_with(Verdict.REFUTED, "e1")]
+    )
+
+    assert result.verdict is Verdict.CONFLICTING
+
+
+def test_adjudication_ignores_failed_candidates_but_requires_one_completed_result() -> None:
+    failed = VerificationResult(
+        claim_id="dev-0",
+        status=ResultStatus.FAILED,
+        rationale="failed",
+        initial_route="single",
+        failure_stage="validation",
+        usage=Usage(input_tokens=0, output_tokens=0, total_tokens=0, complete=True),
+        errors=["FAILED"],
+    )
+    completed = result_with(Verdict.SUPPORTED, "e1")
+
+    assert adjudicate_verification_results([failed, completed]).verdict is Verdict.SUPPORTED
+    with pytest.raises(ValueError, match="completed candidate"):
+        adjudicate_verification_results([failed])
 
 def test_normalize_verification_result_preserves_distinct_conflicting_verdict() -> None:
     result = valid_result().model_copy(

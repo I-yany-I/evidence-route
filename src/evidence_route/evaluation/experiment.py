@@ -133,6 +133,21 @@ def _parent_identity(report: Path) -> tuple[str | None, str | None, dict[str, st
     )
 
 
+def _parent_prompt_hash(report: Path, fallback_prompt: Path) -> str:
+    payload = _read_json(report)
+    value = _find_value(payload, "prompt_bundle_sha256")
+    if value is None:
+        return sha256_file(fallback_prompt)
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or value != value.lower()
+        or any(char not in "0123456789abcdef" for char in value)
+    ):
+        raise ValueError("parent report prompt hash is invalid")
+    return value
+
+
 def _reject_published_target(parent_report: Path, output_dir: Path) -> None:
     report_dir = parent_report.resolve().parent
     target = output_dir.resolve()
@@ -164,6 +179,7 @@ def create_experiment_identity(
     parent_manifest: Path,
     pricing: Path,
     config: Path,
+    parent_config: Path | None = None,
     prompt: Path,
     stability_manifest: Path,
     repeat_schedule: Mapping[str, list[int]],
@@ -176,6 +192,7 @@ def create_experiment_identity(
     parent_report = Path(parent_report)
     parent_manifest = Path(parent_manifest)
     pricing = Path(pricing)
+    parent_config = Path(parent_config) if parent_config is not None else Path(config)
     config = Path(config)
     prompt = Path(prompt)
     stability_manifest = Path(stability_manifest)
@@ -184,6 +201,7 @@ def create_experiment_identity(
         (parent_report, "parent report"),
         (parent_manifest, "parent manifest"),
         (pricing, "pricing"),
+        (parent_config, "parent config"),
         (config, "config"),
         (prompt, "prompt"),
         (stability_manifest, "stability manifest"),
@@ -197,6 +215,7 @@ def create_experiment_identity(
             "parent_activity_id", expected=parent_activity_id, actual=report_activity_id
         )
     links = dict(repeat_zero_artifact_sha256s or report_links)
+    parent_prompt_hash = _parent_prompt_hash(parent_report, prompt)
     identity = StabilityExperimentIdentity(
         experiment_id=experiment_id,
         activity_id=activity_id,
@@ -206,8 +225,8 @@ def create_experiment_identity(
         parent_report_sha256=sha256_file(parent_report),
         parent_manifest_sha256=sha256_file(parent_manifest),
         parent_pricing_sha256=sha256_file(pricing),
-        parent_config_sha256=sha256_file(config),
-        parent_prompt_sha256=sha256_file(prompt),
+        parent_config_sha256=sha256_file(parent_config),
+        parent_prompt_sha256=parent_prompt_hash,
         stability_manifest_sha256=sha256_file(stability_manifest),
         repeat_schedule={str(key): list(value) for key, value in repeat_schedule.items()},
         repeat_zero_artifact_sha256s=links,
@@ -246,17 +265,27 @@ def validate_parent_baseline(
     parent_manifest: Path,
     pricing: Path,
     config: Path,
+    parent_config: Path | None = None,
     prompt: Path,
     stability_manifest: Path | None = None,
 ) -> None:
+    parent_config = Path(parent_config) if parent_config is not None else Path(config)
     for path, expected, field in (
         (Path(parent_report), identity.parent_report_sha256, "parent_report_sha256"),
         (Path(parent_manifest), identity.parent_manifest_sha256, "parent_manifest_sha256"),
         (Path(pricing), identity.parent_pricing_sha256, "parent_pricing_sha256"),
-        (Path(config), identity.parent_config_sha256, "parent_config_sha256"),
-        (Path(prompt), identity.parent_prompt_sha256, "parent_prompt_sha256"),
+        (parent_config, identity.parent_config_sha256, "parent_config_sha256"),
     ):
         _validate_file_hash(path, expected, field)
+    reported_parent_prompt = _parent_prompt_hash(Path(parent_report), Path(prompt))
+    if reported_parent_prompt != identity.parent_prompt_sha256:
+        raise FreezeMismatch(
+            "parent_prompt_sha256",
+            expected=identity.parent_prompt_sha256,
+            actual=reported_parent_prompt,
+        )
+    _validate_file_hash(Path(prompt), identity.prompt_sha256, "prompt_sha256")
+    _validate_file_hash(Path(config), identity.config_sha256, "config_sha256")
     if stability_manifest is not None:
         _validate_file_hash(
             Path(stability_manifest),

@@ -31,10 +31,12 @@ class HybridRouter:
         generation: GenerationSettings,
         *,
         llm: object | None,
+        deterministic_ambiguous: bool = False,
     ) -> None:
         self.settings = settings
         self.generation = generation
         self.llm = llm
+        self.deterministic_ambiguous = deterministic_ambiguous
         self.config_hash = stable_hash(settings.model_dump(mode="json"))
 
     async def route(
@@ -54,6 +56,8 @@ class HybridRouter:
             return self._decision("multi", "rule", ["compound_or_conflict"])
         if not force_llm and self._clear_single(features):
             return self._decision("single", "rule", ["atomic_with_sources"])
+        if not force_llm and self.deterministic_ambiguous:
+            return self._decision("multi", "rule", ["deterministic_ambiguous_multi"])
         if self.llm is None:
             return self._decision("multi", "fallback", ["router_fallback"])
         try:

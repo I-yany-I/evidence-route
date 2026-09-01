@@ -269,11 +269,31 @@ class GraphCampaignExecutor:
         self.provider = provider
         self.components = GraphComponents(
             provider=provider,
-            router=HybridRouter(app_config.routing, app_config.generation, llm=llm),
-            single=SingleVerifier(provider, llm, app_config.evidence, app_config.generation),
-            decomposer=ClaimDecomposer(llm, app_config.generation),
+            router=HybridRouter(
+                app_config.routing,
+                app_config.generation,
+                llm=llm,
+                deterministic_ambiguous=app_config.hardening.deterministic_ambiguous,
+            ),
+            single=SingleVerifier(
+                provider,
+                llm,
+                app_config.evidence,
+                app_config.generation,
+                hardened=app_config.hardening.hardened_judge,
+            ),
+            decomposer=ClaimDecomposer(
+                llm,
+                app_config.generation,
+                deterministic=app_config.hardening.deterministic_decomposition,
+            ),
             worker=EvidenceWorker(provider, llm, app_config.evidence, app_config.generation),
-            judge=VerdictJudge(llm, app_config.evidence, app_config.generation),
+            judge=VerdictJudge(
+                llm,
+                app_config.evidence,
+                app_config.generation,
+                hardened=app_config.hardening.hardened_judge,
+            ),
             validator=ResultValidator(
                 low_confidence=app_config.routing.low_confidence,
                 minimum_coverage=app_config.routing.minimum_coverage,

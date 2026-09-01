@@ -154,6 +154,11 @@ calibration 收集、保存结果 replay、冻结策略、三策略交错 dev、
 这里的结果不是官方 leaderboard 成绩。只有完整 campaign 通过发布门禁后，报告命令才会从
 `summary.json` 同步更新此区块和简历片段。
 
+独立稳定性加固实验 `evidence-route-hardening-20260901` 的严格 stability 为 14/20，低于 17/20
+工程门槛，且 adaptive dev 完成率和 full-manifest macro-F1 均未超过上述 baseline，因此只保留为
+工程失败分析，不覆盖本节结果。provider-free before/after、口径说明与账本核验位于
+`reports/evidence-route-hardening-20260901/stability_comparison.md`。
+
 简历项目表述、90 秒讲法和常见追问见 [docs/RESUME_PROJECT.md](docs/RESUME_PROJECT.md)。其中明确区分了可复现工程上界与尚未生成的真实模型结果。
 
 ## Artifact And Metric Definitions

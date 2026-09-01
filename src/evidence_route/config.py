@@ -31,6 +31,13 @@ class RoutingSettings(ConfigModel):
     minimum_coverage: float = Field(default=1.0, ge=0, le=1)
 
 
+class HardeningSettings(ConfigModel):
+    deterministic_ambiguous: bool = False
+    deterministic_decomposition: bool = False
+    hardened_judge: bool = False
+    adjudication: bool = False
+
+
 class EvidenceSettings(ConfigModel):
     probe_top_k: int = Field(default=3, gt=0)
     probe_chars: int = Field(default=450, gt=0)
@@ -67,6 +74,7 @@ class BudgetSettings(ConfigModel):
 class AppConfig(ConfigModel):
     llm: LLMSettings
     routing: RoutingSettings = Field(default_factory=RoutingSettings)
+    hardening: HardeningSettings = Field(default_factory=HardeningSettings)
     evidence: EvidenceSettings = Field(default_factory=EvidenceSettings)
     generation: GenerationSettings = Field(default_factory=GenerationSettings)
     budget: BudgetSettings = Field(default_factory=BudgetSettings)

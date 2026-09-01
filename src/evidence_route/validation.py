@@ -4,8 +4,73 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
-from evidence_route.contracts import ResultStatus, Strategy, Verdict, VerificationResult
+from evidence_route.contracts import ResultStatus, Strategy, Usage, Verdict, VerificationResult
 from evidence_route.evaluation.stability import canonicalize_citation_url
+
+
+def adjudicate_verification_results(
+    candidates: Iterable[VerificationResult],
+) -> VerificationResult:
+    """Choose a conservative, order-independent result from valid completed candidates."""
+    valid = [
+        candidate
+        for candidate in candidates
+        if candidate.status is ResultStatus.COMPLETED
+        and candidate.verdict is not None
+        and candidate.confidence is not None
+        and candidate.usage.complete
+    ]
+    if not valid:
+        raise ValueError("adjudication requires at least one completed candidate")
+    claim_ids = {candidate.claim_id for candidate in valid}
+    if len(claim_ids) != 1:
+        raise ValueError("adjudication candidates must have the same claim_id")
+
+    def key(candidate: VerificationResult) -> tuple[object, ...]:
+        evidence_ids = tuple(sorted({citation.evidence_id for citation in candidate.citations}))
+        citation_urls = tuple(
+            sorted(
+                canonicalize_citation_url(str(citation.source_url))
+                for citation in candidate.citations
+            )
+        )
+        return evidence_ids, citation_urls, candidate.rationale.strip(), -candidate.confidence
+
+    selected = min(valid, key=key)
+    verdicts = {candidate.verdict for candidate in valid}
+    if len(verdicts) == 1:
+        verdict = selected.verdict
+    elif verdicts == {Verdict.SUPPORTED, Verdict.REFUTED}:
+        verdict = Verdict.CONFLICTING
+    else:
+        verdict = Verdict.NOT_ENOUGH_EVIDENCE
+    usage = Usage(
+        input_tokens=sum(candidate.usage.input_tokens for candidate in valid),
+        output_tokens=sum(candidate.usage.output_tokens for candidate in valid),
+        total_tokens=sum(candidate.usage.total_tokens for candidate in valid),
+        complete=True,
+    )
+    errors = list(selected.errors)
+    if len(verdicts) > 1 and "ADJUDICATED_DISAGREEMENT" not in errors:
+        errors.append("ADJUDICATED_DISAGREEMENT")
+    return selected.model_copy(
+        update={
+            "verdict": verdict,
+            "confidence": min(candidate.confidence for candidate in valid),
+            "available_evidence_ids": sorted(
+                {
+                    evidence_id
+                    for candidate in valid
+                    for evidence_id in candidate.available_evidence_ids
+                }
+            ),
+            "usage": usage,
+            "errors": errors,
+            "estimated_cost_micro_cny": None,
+            "cost_currency": None,
+            "price_config_id": None,
+        }
+    )
 
 
 class ValidationAction(StrEnum):

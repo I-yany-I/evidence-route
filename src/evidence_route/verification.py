@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import ceil
 from typing import Any, Literal
 
 from evidence_route.artifacts import BillingStateError
@@ -22,6 +23,8 @@ from evidence_route.evaluation.stability import canonicalize_citation_url
 from evidence_route.llm import BillingUncertain
 from evidence_route.prompts import (
     decomposer_messages,
+    hardened_judge_messages,
+    hardened_single_messages,
     judge_messages,
     single_messages,
     worker_messages,
@@ -127,11 +130,14 @@ class SingleVerifier:
         llm: Any,
         evidence_settings: EvidenceSettings,
         generation: GenerationSettings,
+        *,
+        hardened: bool = False,
     ) -> None:
         self.provider = provider
         self.llm = llm
         self.evidence_settings = evidence_settings
         self.generation = generation
+        self.hardened = hardened
 
     async def verify(
         self, run_id: str, claim_id: str, claim: str, features: ClaimFeatures
@@ -153,7 +159,11 @@ class SingleVerifier:
                 run_id=run_id,
                 node="single",
                 task_id="root",
-                messages=single_messages(claim, features, evidence),
+                messages=(
+                    hardened_single_messages(claim, features, evidence)
+                    if self.hardened
+                    else single_messages(claim, features, evidence)
+                ),
                 schema=VerdictDraft,
                 max_input_tokens=self.generation.single.max_input_tokens,
                 max_output_tokens=self.generation.single.max_output_tokens,
@@ -177,13 +187,28 @@ class SingleVerifier:
 
 
 class ClaimDecomposer:
-    def __init__(self, llm: Any, generation: GenerationSettings) -> None:
+    def __init__(
+        self, llm: Any, generation: GenerationSettings, *, deterministic: bool = False
+    ) -> None:
         self.llm = llm
         self.generation = generation
+        self.deterministic = deterministic
 
     async def decompose(
         self, run_id: str, claim: str, features: ClaimFeatures
     ) -> list[VerificationTask]:
+        if self.deterministic:
+            units = features.claim_units
+            task_count = min(3, len(units))
+            chunk_size = ceil(len(units) / task_count)
+            return [
+                VerificationTask(
+                    task_id=f"t{index}",
+                    claim_unit_ids=[unit.unit_id for unit in units[start : start + chunk_size]],
+                    query=" ".join(unit.text for unit in units[start : start + chunk_size]),
+                )
+                for index, start in enumerate(range(0, len(units), chunk_size))
+            ][:3]
         response = await self.llm.invoke(
             run_id=run_id,
             node="decomposer",
@@ -259,11 +284,17 @@ class EvidenceWorker:
 
 class VerdictJudge:
     def __init__(
-        self, llm: Any, evidence_settings: EvidenceSettings, generation: GenerationSettings
+        self,
+        llm: Any,
+        evidence_settings: EvidenceSettings,
+        generation: GenerationSettings,
+        *,
+        hardened: bool = False,
     ) -> None:
         self.llm = llm
         self.evidence_settings = evidence_settings
         self.generation = generation
+        self.hardened = hardened
 
     async def judge(
         self,
@@ -279,7 +310,11 @@ class VerdictJudge:
             run_id=run_id,
             node="judge",
             task_id="root",
-            messages=judge_messages(claim, workers),
+            messages=(
+                hardened_judge_messages(claim, workers)
+                if self.hardened
+                else judge_messages(claim, workers)
+            ),
             schema=VerdictDraft,
             max_input_tokens=self.generation.judge.max_input_tokens,
             max_output_tokens=self.generation.judge.max_output_tokens,

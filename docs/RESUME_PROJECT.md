@@ -22,13 +22,21 @@
 
 简历中的质量、成本和延迟数字必须同时附带 cohort、完成率和模型身份限制；不能把 balanced subset 结果写成完整 AVeriTeC leaderboard 成绩。当前 adaptive stability 为 13/20 (65.0%)，低于项目定义的 85% 工程阈值，因此应把稳定性写成待改进项而不是已达标指标。
 
+## 稳定性加固实验结论
+
+独立实验 `evidence-route-hardening-20260901` 已完成 280/280 个 work item。严格 Gate A stability 从 13/20 提升到 14/20，仍低于 17/20 门槛；adaptive dev 完成率从 90.0% 降至 88.8%，full-manifest macro-F1 从 0.392 降至 0.308，因此本轮只作为工程失败分析，不替换已发布 baseline，也不作为简历主结果。
+
+诊断口径允许有效 partial 参与比较，verdict consistency 为 16/20 -> 17/20，category-free claim 为 4/20 -> 11/20（7 条改善、0 条回退）。这两个数字用于定位 evidence/citation、route 和 status drift，不能代替严格 stability 指标。实验独立账本为 583 个 completed call / CNY 69.864480；activity 汇总包含继承的 calibration accounting，共 756 个 call / CNY 87.481944。
+
+本轮还发现历史 `experiment.json` 将 `parent_prompt_sha256` 记录成了当前实验 prompt hash。历史文件保持不可变并在对比报告中标注；源码已修复为从父报告读取父 prompt hash，同时单独校验当前实验 prompt，避免后续实验混淆父子身份。
+
 ## 90 秒面试讲法
 
 我做的是一个成本感知的事实核查 Agent。输入 claim 先做确定性分析和冻结证据 probe，再由 rule-first router 选择 single 或 multi。简单 claim 走一次核验；复杂或低置信场景才拆成最多三个并行 worker，再由 judge 聚合，single 只允许一次升级。这样路由策略的收益可以和 always-single、always-multi 在同一 manifest、同一模型配置下比较。
 
 我把难点放在可验证性而不是 prompt 堆叠上。运行侧只读 claim-only manifest，gold 和官方 evaluator 在 scorer 边界；每次模型调用写入 SQLite ledger，call ID、request fingerprint、usage、价格和响应模型 ID 都可回放。预算用整数 micro-CNY 预留，usage 或账单不完整就停止活动。最终报告要求完整 manifest 分母、失败惩罚和发布门禁，避免只挑成功样本报结果。
 
-当前公开的是 Gate A 的可审计实现和一次完整的冻结 provider 评测；provider 是 OpenAI-compatible relay，响应模型身份仍是 self-reported、identity unverified。报告同时保留 full-manifest 分数和 completed-only 官方分数，避免把 partial/failed 样本从分母中静默删除。
+当前公开的是 Gate A 的可审计实现和一次完整的冻结 provider 评测；provider 是 OpenAI-compatible relay，响应模型身份仍是 self-reported、identity unverified。报告同时保留 full-manifest 分数和 completed-only 官方分数，避免把 partial/failed 样本从分母中静默删除。后续 stability hardening 实验没有达到严格门槛，因此简历继续使用已发布 Gate A baseline，并把新实验作为失败分析而不是成绩升级。
 
 ## 高频追问
 
@@ -72,11 +80,16 @@ python -m evidence_route.cli evaluate `
   --experiment-dir artifacts/evaluation/evidence-route-hardening-20260901/identity `
   --parent-activity evidence-route-gate-a-20260830-clean1 `
   --parent-report reports/evidence-route-gate-a-20260830-clean1/final/summary.json `
+  --parent-config configs/calibrated.evidence-route-gate-a-20260830-clean1.yaml `
+  --config configs/stability-v2.yaml `
   --max-items 10
 ```
 
 后续批次使用相同参数，将 `--start-after-calibration` 改为 `--resume`。运行前先执行离线测试和预算预览，
 确认新的实验身份、模型 alias、价格文件和预期费用后再授权 provider 调用。
+
+其中 `--parent-config` 必须指向父 Gate A calibration 实际使用的配置，`--config` 指向当前实验配置。
+两者可以不同；实验身份会分别记录并校验这两个文件的 SHA-256，避免把 v2 配置误记成历史基线。
 
 在仓库根目录执行：
 

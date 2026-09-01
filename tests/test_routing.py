@@ -108,6 +108,25 @@ async def test_uncertain_route_uses_structured_llm() -> None:
 
 
 @pytest.mark.asyncio
+async def test_hardened_ambiguous_route_skips_llm() -> None:
+    llm = CountingLLM()
+    claim_features = features(
+        atomic_clause_count=2,
+        claim_units=[ClaimUnit(unit_id="u0", text="one"), ClaimUnit(unit_id="u1", text="two")],
+        probe_source_count=1,
+    )
+
+    decision = await HybridRouter(
+        RoutingSettings(), GenerationSettings(), llm=llm, deterministic_ambiguous=True
+    ).route("run", Strategy.ADAPTIVE, claim_features)
+
+    assert decision.route == "multi"
+    assert decision.source == "rule"
+    assert decision.reason_codes == ["deterministic_ambiguous_multi"]
+    assert llm.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_force_llm_bypasses_compound_rule() -> None:
     llm = CountingLLM()
     claim_features = features(
