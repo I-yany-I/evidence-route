@@ -946,7 +946,7 @@ class ProductionCampaignService:
             current_freeze = verify_current_freeze(
                 plan.freeze,
                 **freeze_kwargs,
-                allow_descendant_git=billing_recovery_requested,
+                allow_descendant_git=experiment_mode,
             )
 
         def build_executor() -> Any:
