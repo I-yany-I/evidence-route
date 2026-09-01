@@ -90,6 +90,18 @@ def _require_file(path: Path, label: str) -> Path:
     return path
 
 
+def _validate_selected_routing_policy(
+    calibration_report: Path,
+    app_config: AppConfig,
+    calibration_config: AppConfig | None = None,
+) -> None:
+    payload = json.loads(Path(calibration_report).read_text(encoding="utf-8"))
+    selected_hash = payload["selected"].get("config_hash")
+    policy_config = calibration_config or app_config
+    if selected_hash != stable_hash(policy_config.routing.model_dump(mode="json")):
+        raise ValueError("calibration routing policy differs from selected candidate")
+
+
 def _claim_map(manifest: Any) -> dict[str, str]:
     return {item.claim_id: item.claim for item in manifest.items}
 
@@ -218,6 +230,7 @@ class ProductionCampaignService:
         calibration_report: Path,
         replay_metadata: Path,
         allow_prompt_drift: bool = False,
+        calibration_config: AppConfig | None = None,
     ) -> None:
         frozen = {
             "manifest_freeze_git_sha": calibration_plan.manifest_freeze_git_sha,
@@ -261,9 +274,11 @@ class ProductionCampaignService:
             or not isinstance(payload.get("selected"), dict)
         ):
             raise ValueError("calibration report is not a complete frozen replay")
-        selected_hash = payload["selected"].get("config_hash")
-        if selected_hash != stable_hash(app_config.routing.model_dump(mode="json")):
-            raise ValueError("current routing config differs from selected calibration policy")
+        _validate_selected_routing_policy(
+            calibration_report,
+            app_config,
+            calibration_config,
+        )
         metadata = json.loads(replay_metadata.read_text(encoding="utf-8"))
         if metadata.get("runtime_manifest_sha256") != calibration_plan.runtime_manifest_sha256:
             raise ValueError("replay metadata runtime manifest differs from calibration plan")
@@ -626,6 +641,11 @@ class ProductionCampaignService:
         activity_path = activity_dir / "activity.json"
 
         app_config = load_app_config(_require_file(config_path, "configuration"))
+        calibration_config = (
+            load_app_config(_require_file(parent_config, "parent configuration"))
+            if experiment_mode and parent_config is not None
+            else None
+        )
         pricing = self._load_pricing(pricing_path)
         dev_manifest = load_runtime_manifest(
             _require_file(manifest_path, "dev runtime manifest"),
@@ -723,6 +743,7 @@ class ProductionCampaignService:
             calibration_report=calibration_report,
             replay_metadata=replay_metadata_path,
             allow_prompt_drift=experiment_mode,
+            calibration_config=calibration_config,
         )
         bounds = estimate_call_bounds(
             compute_gate_a_call_profile(),

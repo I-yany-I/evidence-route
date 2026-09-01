@@ -5,12 +5,14 @@ import json
 import sqlite3
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from evidence_route.artifacts import SQLiteRunStore
 from evidence_route.budget import BudgetExceeded
 from evidence_route.cli import ProductionServices
+from evidence_route.config import stable_hash
 from evidence_route.contracts import ResultStatus, Usage, Verdict, VerificationResult
 from evidence_route.evaluation.activity import (
     ActivityRecord,
@@ -32,6 +34,7 @@ from evidence_route.evaluation.lifecycle import load_activity, persist_activity,
 from evidence_route.evaluation.runner import CampaignProcessInterruption
 from evidence_route.execution import build_run_artifact, load_price_config
 from evidence_route.llm import RawCompletion
+from evidence_route.evaluation.production_evaluation import _validate_selected_routing_policy
 
 
 def _write_runtime_inputs(tmp_path: Path, *, cap_cny: float = 350.0) -> dict[str, Path]:
@@ -100,6 +103,28 @@ def _write_runtime_inputs(tmp_path: Path, *, cap_cny: float = 350.0) -> dict[str
         "config": config,
         "pricing": pricing,
     }
+
+
+def test_experiment_routing_policy_is_checked_against_parent_config(tmp_path: Path) -> None:
+    report = tmp_path / "calibration-report.json"
+    parent_routing = {"clear_multi_clauses": 3, "clear_single_min_sources": 1}
+    report.write_text(
+        json.dumps({"selected": {"config_hash": stable_hash(parent_routing)}}),
+        encoding="utf-8",
+    )
+    parent_config = SimpleNamespace(
+        routing=SimpleNamespace(model_dump=lambda mode="json": parent_routing)
+    )
+    experiment_config = SimpleNamespace(
+        routing=SimpleNamespace(
+            model_dump=lambda mode="json": {
+                "clear_multi_clauses": 3,
+                "clear_single_min_sources": 2,
+            }
+        )
+    )
+
+    _validate_selected_routing_policy(report, experiment_config, parent_config)
 
 
 class _Transport:
