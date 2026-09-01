@@ -756,12 +756,17 @@ def compute_gate_a_call_profile(
     dev_claims: int = 80,
     stability_claims: int = 20,
     stability_extra_repeats: int = 2,
+    *,
+    include_multi_recovery: bool = False,
 ) -> CallProfile:
     """Return the calculated Gate A worst-case node call profile."""
 
     values = (calibration_claims, dev_claims, stability_claims, stability_extra_repeats)
     if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in values):
         raise ValueError("call profile counts must be non-negative integers")
+    if not isinstance(include_multi_recovery, bool):
+        raise ValueError("include_multi_recovery must be a boolean")
+    recovery_single = int(include_multi_recovery)
     calibration = CallProfile(
         router=calibration_claims,
         single=calibration_claims,
@@ -771,14 +776,14 @@ def compute_gate_a_call_profile(
     )
     dev = CallProfile(
         router=dev_claims,
-        single=2 * dev_claims,
+        single=(2 + recovery_single) * dev_claims,
         decomposer=2 * dev_claims,
         worker=6 * dev_claims,
         judge=2 * dev_claims,
     )
     stability = CallProfile(
         router=stability_claims * stability_extra_repeats,
-        single=stability_claims * stability_extra_repeats,
+        single=(1 + recovery_single) * stability_claims * stability_extra_repeats,
         decomposer=stability_claims * stability_extra_repeats,
         worker=3 * stability_claims * stability_extra_repeats,
         judge=stability_claims * stability_extra_repeats,

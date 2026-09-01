@@ -58,6 +58,8 @@ def compute_gate_a_call_profile(
     dev_claims: int = 80,
     stability_claims: int = 20,
     stability_extra_repeats: int = 2,
+    *,
+    include_multi_recovery: bool = False,
 ):
     """Compute the Gate A worst-case node calls.
 
@@ -67,7 +69,13 @@ def compute_gate_a_call_profile(
 
     from evidence_route.evaluation.activity import compute_gate_a_call_profile as _compute
 
-    return _compute(calibration_claims, dev_claims, stability_claims, stability_extra_repeats)
+    return _compute(
+        calibration_claims,
+        dev_claims,
+        stability_claims,
+        stability_extra_repeats,
+        include_multi_recovery=include_multi_recovery,
+    )
 
 
 def estimate_call_bounds(

@@ -38,6 +38,7 @@ class HardeningSettings(ConfigModel):
     hardened_worker: bool = False
     adjudication: bool = False
     normalize_output: bool = False
+    multi_single_recovery: bool = False
 
 
 class EvidenceSettings(ConfigModel):

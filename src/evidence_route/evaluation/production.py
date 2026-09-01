@@ -313,6 +313,7 @@ class GraphCampaignExecutor:
                 if app_config.hardening.adjudication
                 else None
             ),
+            multi_single_recovery=app_config.hardening.multi_single_recovery,
         )
 
     async def execute(

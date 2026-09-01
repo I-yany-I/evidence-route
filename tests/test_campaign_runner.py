@@ -99,7 +99,7 @@ def _record_artifact_call(
     )
 
 
-def test_gate_a_profile_is_1544_calls() -> None:
+def test_gate_a_profile_is_1544_calls_without_recovery() -> None:
     profile = compute_gate_a_call_profile(32, 80, 20, 2)
     assert profile.model_dump() == {
         "router": 152,
@@ -109,6 +109,13 @@ def test_gate_a_profile_is_1544_calls() -> None:
         "judge": 232,
     }
     assert profile.total == 1544
+
+
+def test_v4_profile_includes_one_single_recovery_per_adaptive_multi_item() -> None:
+    profile = compute_gate_a_call_profile(32, 80, 20, 2, include_multi_recovery=True)
+
+    assert profile.single == 352
+    assert profile.total == 1664
 
 
 def test_call_bounds_include_repair_fault_and_reserve() -> None:

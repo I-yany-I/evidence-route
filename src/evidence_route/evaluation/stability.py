@@ -7,7 +7,8 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Any
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
-from pydantic import Field
+from pydantic import Field, TypeAdapter
+from pydantic.networks import HttpUrl
 
 from evidence_route.config import stable_hash
 from evidence_route.contracts import StrictModel, VerificationResult
@@ -36,6 +37,7 @@ class RepeatSnapshot(StrictModel):
     route: str | None = None
     route_source: str | None = None
     escalated: bool | None = None
+    fallback_used: bool = False
     worker_count: int | None = Field(default=None, ge=0)
     error_codes: list[str] = Field(default_factory=list)
     citation_urls: list[str] = Field(default_factory=list)
@@ -88,6 +90,9 @@ class StabilityComparison(StrictModel):
     experiment_consistent_claim_count: int = Field(ge=0)
     baseline_completion_rate: float = Field(ge=0, le=1)
     experiment_completion_rate: float = Field(ge=0, le=1)
+
+
+_HTTP_URL_ADAPTER = TypeAdapter(HttpUrl)
 
 
 def _diagnostic_hash(summary: StabilityDiagnosticSummary) -> str:
@@ -208,7 +213,7 @@ _EVIDENCE_FIELDS = (
     "citation_urls",
     "citations_valid",
 )
-_ROUTE_FIELDS = ("route", "route_source", "escalated", "worker_count")
+_ROUTE_FIELDS = ("route", "route_source", "escalated", "fallback_used", "worker_count")
 _VALIDATION_FIELDS = ("status", "error_codes", "citations_valid")
 _COMPARISON_FIELDS = _EVIDENCE_FIELDS + _ROUTE_FIELDS + ("status", "error_codes", "verdict")
 
@@ -330,6 +335,7 @@ def _build_repeat_snapshot(artifact: Any, repeat: int, run_store: Any) -> Repeat
         route=result.initial_route,
         route_source=route_source,
         escalated=result.escalated,
+        fallback_used=result.fallback_used,
         worker_count=worker_count,
         error_codes=error_codes,
         citation_urls=urls,
@@ -446,6 +452,11 @@ def canonicalize_citation_url(value: str) -> str:
     return urlunsplit((parts.scheme.lower(), netloc, path, query, ""))
 
 
+def canonicalize_citation_http_url(value: str) -> HttpUrl:
+    """Canonicalize a citation URL while preserving the contract's HttpUrl type."""
+    return _HTTP_URL_ADAPTER.validate_python(canonicalize_citation_url(value))
+
+
 def citation_urls(result: VerificationResult) -> list[str]:
     """Return sorted, unique canonical URLs from a verification result."""
     return sorted(
@@ -494,6 +505,7 @@ def normalize_result(result: VerificationResult | None) -> dict[str, object]:
             "route": None,
             "route_source": None,
             "escalated": None,
+            "fallback_used": False,
             "errors": [],
             "available_evidence_ids": [],
             "citation_urls": [],
@@ -506,6 +518,7 @@ def normalize_result(result: VerificationResult | None) -> dict[str, object]:
         "route": result.initial_route,
         "route_source": None,
         "escalated": result.escalated,
+        "fallback_used": result.fallback_used,
         "errors": _normalize_strings(result.errors),
         "available_evidence_ids": _normalize_strings(result.available_evidence_ids),
         "citation_urls": citation_urls(result),

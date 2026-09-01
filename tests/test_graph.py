@@ -16,7 +16,12 @@ from evidence_route.contracts import (
     VerificationResult,
     VerificationTask,
 )
-from evidence_route.graph import GraphComponents, build_graph, initial_state, make_worker_node
+from evidence_route.graph import (
+    GraphComponents,
+    build_graph,
+    initial_state,
+    make_worker_node,
+)
 from evidence_route.validation import ResultValidator
 from evidence_route.verification import EvidenceWorker, SingleVerifier
 
@@ -57,6 +62,26 @@ def result(claim_id="dev-0", route="single", escalated=False, citations=None, av
 
 class Single:
     async def verify(self, run_id, claim_id, claim, features):
+        return result(claim_id)
+
+
+class RecoverySingle(Single):
+    def __init__(self, *, fail=False):
+        self.called = 0
+        self.fail = fail
+
+    async def verify(self, run_id, claim_id, claim, features):
+        self.called += 1
+        if self.fail:
+            return VerificationResult(
+                claim_id=claim_id,
+                status=ResultStatus.FAILED,
+                rationale="single recovery failed",
+                initial_route="single",
+                failure_stage="single",
+                usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2, complete=True),
+                errors=["SINGLE_VERIFICATION_FAILED"],
+            )
         return result(claim_id)
 
 
@@ -189,6 +214,11 @@ def components(route="single", validator=None):
         run_store=None,
         trace=None,
     )
+
+
+def recovery_components(single):
+    values = components("multi", Validator(["fail", "accept"]))
+    return replace(values, single=single, multi_single_recovery=True)
 
 
 def test_graph_components_accept_an_optional_adjudicator() -> None:
@@ -366,3 +396,42 @@ async def test_multi_worker_graph_validates_against_aggregated_execution_evidenc
     expected = {"worker-one", "worker-two", "worker-three"}
     assert state["execution_evidence_ids"] == expected
     assert validator.evidence_ids == [expected]
+
+
+@pytest.mark.asyncio
+async def test_multi_failure_recovers_once_with_single_and_preserves_route() -> None:
+    single = RecoverySingle()
+    graph = build_graph(
+        recovery_components(single), checkpointer=InMemorySaver()
+    )
+
+    state = await graph.ainvoke(
+        initial_state("run-recovery", "dev-5", "Compound claim", Strategy.ADAPTIVE),
+        config={"configurable": {"thread_id": "run-recovery"}},
+    )
+
+    assert single.called == 1
+    assert state["fallback_used"] is True
+    assert state["final_result"].status is ResultStatus.COMPLETED
+    assert state["final_result"].initial_route == "multi"
+    assert state["final_result"].fallback_used is True
+
+
+@pytest.mark.asyncio
+async def test_failed_single_recovery_remains_failed_and_is_not_retried() -> None:
+    single = RecoverySingle(fail=True)
+    values = components("multi", Validator(["fail", "fail"]))
+    graph = build_graph(
+        replace(values, single=single, multi_single_recovery=True),
+        checkpointer=InMemorySaver(),
+    )
+
+    state = await graph.ainvoke(
+        initial_state("run-recovery-failed", "dev-6", "Compound claim", Strategy.ADAPTIVE),
+        config={"configurable": {"thread_id": "run-recovery-failed"}},
+    )
+
+    assert single.called == 1
+    assert state["fallback_used"] is True
+    assert state["final_result"].status is ResultStatus.FAILED
+    assert state["final_result"].fallback_used is True

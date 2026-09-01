@@ -1,3 +1,7 @@
+import warnings
+
+from pydantic import HttpUrl
+
 from evidence_route.contracts import Citation, Evidence, Usage, Verdict, VerdictDraft
 from evidence_route.evaluation.stability import citation_is_valid, citation_urls
 from evidence_route.verification import result_from_draft
@@ -54,7 +58,22 @@ def test_verification_canonicalizes_citation_url_without_changing_quote() -> Non
     result = _result("HTTPS://Example.ORG:443/fact/?b=2&a=1#quote")
 
     assert str(result.citations[0].source_url) == "https://example.org/fact?a=1&b=2"
+    assert isinstance(result.citations[0].source_url, HttpUrl)
     assert result.citations[0].quote == "The quoted text."
+
+
+def test_canonicalized_citation_serializes_without_pydantic_warning() -> None:
+    result = _result("HTTPS://Example.ORG:443/fact/?b=2&a=1#quote")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result.model_dump(mode="json")
+
+    assert not [
+        warning
+        for warning in caught
+        if "Pydantic serializer warnings" in str(warning.message)
+    ]
 
 
 def test_equivalent_citation_urls_have_same_comparison_and_validity() -> None:

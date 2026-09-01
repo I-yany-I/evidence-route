@@ -19,6 +19,7 @@ from evidence_route.budget import PriceConfig
 from evidence_route.config import (
     BudgetSettings,
     GenerationSettings,
+    HardeningSettings,
     load_app_config,
     stable_hash,
 )
@@ -210,6 +211,7 @@ class ProductionServices:
                 if app_config.hardening.adjudication
                 else None
             ),
+            multi_single_recovery=app_config.hardening.multi_single_recovery,
         )
         graph_config = {"configurable": {"thread_id": run_id}}
         async with AsyncSqliteSaver.from_conn_string(str(checkpoint_db)) as saver:
@@ -342,11 +344,14 @@ class ProductionServices:
         if not isinstance(raw_config, dict):
             raise ValueError("configuration root must be a mapping")
         generation = GenerationSettings.model_validate(raw_config.get("generation", {}))
+        hardening = HardeningSettings.model_validate(raw_config.get("hardening", {}))
         budget = BudgetSettings.model_validate(raw_config.get("budget", {}))
         raw_pricing = yaml.safe_load(pricing_path.read_text(encoding="utf-8")) or {}
         pricing = PriceConfig.model_validate(raw_pricing)
         bounds = estimate_call_bounds(
-            compute_gate_a_call_profile(),
+            compute_gate_a_call_profile(
+                include_multi_recovery=hardening.multi_single_recovery
+            ),
             generation,
             pricing,
             reserve_ratio=budget.reserve_ratio,

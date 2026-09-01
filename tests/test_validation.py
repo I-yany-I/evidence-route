@@ -155,6 +155,21 @@ def test_adjudication_ignores_failed_candidates_but_requires_one_completed_resul
     with pytest.raises(ValueError, match="completed candidate"):
         adjudicate_verification_results([failed])
 
+
+def test_adjudication_preserves_distinct_claim_units_from_one_evidence_source() -> None:
+    first = result_with(Verdict.SUPPORTED, "e1")
+    second_citation = first.citations[0].model_copy(
+        update={"claim_unit_ids": ["u1"], "quote": "second quote"}
+    )
+    candidate = first.model_copy(
+        update={"citations": [first.citations[0], second_citation]}
+    )
+
+    adjudicated = adjudicate_verification_results([candidate])
+
+    assert len(adjudicated.citations) == 2
+    assert [citation.claim_unit_ids for citation in adjudicated.citations] == [["u0"], ["u1"]]
+
 def test_normalize_verification_result_preserves_distinct_conflicting_verdict() -> None:
     result = valid_result().model_copy(
         update={"verdict": "Conflicting Evidence/Cherrypicking"}
@@ -280,3 +295,21 @@ def test_validator_normalizes_only_when_opted_in() -> None:
     assert decision.action is ValidationAction.ACCEPT
     assert decision.result is not result
     assert decision.result.rationale == "draft"
+
+
+def test_recovery_result_cannot_escalate_again() -> None:
+    result = valid_result().model_copy(update={"initial_route": "multi"})
+
+    decision = ResultValidator(
+        low_confidence=0.65, minimum_coverage=1.0, normalize_output=True
+    ).validate(
+        result=result,
+        claim_unit_ids=["u0"],
+        evidence_ids=set(),
+        escalation_count=0,
+        strategy="adaptive",
+        draft_origin="single",
+        fallback_used=True,
+    )
+
+    assert decision.action is ValidationAction.FAIL

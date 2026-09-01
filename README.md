@@ -163,6 +163,22 @@ full-manifest macro-F1 为 0.345、完成率为 82.5%，相对 always_multi 的 
 全部为 completed，activity 汇总成本（含继承的 calibration accounting）为 CNY 81.811188；
 完整报告位于 `reports/evidence-route-stability-v2-20260901/`。
 
+随后完成的稳定性 v3 实验 `evidence-route-stability-v3-20260901` 同样完成 280/280 个 work item，
+严格 stability 为 13/20 (65.0%)，达到历史 Gate A 水平但仍低于 17/20 工程门槛。v3 的 adaptive
+full-manifest macro-F1 为 0.351、完成率为 72.5%，相对 always_multi 的 token 降幅为 12.4%；
+相比 v2 的 0.345 和 11/20 有改善，但仍低于 Gate A 的 0.392、90.0% 和 21.8%，因此不能替换
+已发布 baseline。provider-free 诊断识别出 evidence/citation drift 6/20、incomplete/failed
+2/20 和 provider variance 1/20；v3 activity ledger 共 624 次 fresh call、汇总成本为 CNY
+80.762184，usage 完整且没有 billing uncertainty。完整报告位于
+`reports/evidence-route-stability-v3-20260901/`。
+
+随后开始稳定性 v4 工程修复：新增证据感知的确定性 citation projection，并为 multi 验证失败增加
+一次性、可审计的 single recovery。recovery 保留初始 multi 路由、保留失败错误并把额外调用纳入
+预算上界；旧配置默认关闭，只有 `configs/stability-v4.yaml` 显式开启。v4 离线测试已覆盖引用
+去重、跨 claim unit coverage、回退成功/失败和调用上界；在付费 pilot 通过前不宣称稳定性已经达标。
+启用 recovery 后 Gate A 规模的 base/repair/fault 上界为 `1664/3328/9984`，相比旧配置的
+`1544/3088/9264` 多出的调用是 recovery 预留，不是实际已发生费用。
+
 简历项目表述、90 秒讲法和常见追问见 [docs/RESUME_PROJECT.md](docs/RESUME_PROJECT.md)。其中明确区分了可复现工程上界与尚未生成的真实模型结果。
 
 ## Artifact And Metric Definitions
@@ -172,6 +188,8 @@ full-manifest macro-F1 为 0.345、完成率为 82.5%，相对 always_multi 的 
 - Cost：由 provider usage 与冻结 CNY 价格配置计算，所有预算比较使用整数 micro-CNY。
 - Latency：P50/P95 只使用 fresh end-to-end latency；checkpoint downtime 与 cache hit 单列。
 - Stability：20 条 claim 的 adaptive repeat 0/1/2 verdict 一致率和 Wilson 区间。
+- Recovery：multi 失败后的 single 只允许一次；结果带有 `fallback_used` 和
+  `MULTI_SINGLE_RECOVERY`，成功与失败都进入 artifact 和完整分母。
 
 ## Reproducibility
 

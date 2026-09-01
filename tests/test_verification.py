@@ -17,6 +17,7 @@ from evidence_route.verification import (
     EvidenceWorker,
     SingleVerifier,
     VerdictJudge,
+    project_citations,
 )
 
 
@@ -161,6 +162,84 @@ def multi_features() -> ClaimFeatures:
     )
 
 
+def citation(evidence_id: str, source_url: str, unit_ids: list[str] | None = None) -> Citation:
+    return Citation(
+        evidence_id=evidence_id,
+        claim_unit_ids=unit_ids or ["u0"],
+        question="What does the source say?",
+        answer=f"The source answers the claim using {evidence_id}.",
+        quote=f"Quoted text from {evidence_id}.",
+        stance="supports",
+        source_url=source_url,
+    )
+
+
+def citation_evidence(evidence_id: str, source_url: str) -> Evidence:
+    return Evidence(
+        evidence_id=evidence_id,
+        title=evidence_id,
+        source_url=source_url,
+        text=f"Evidence text for {evidence_id}.",
+        provider="averitec_frozen",
+        snapshot_sha256="a" * 64,
+        ranking_score=1,
+    )
+
+
+def test_project_citations_is_order_independent_and_deduplicates_source_urls() -> None:
+    evidence = [
+        citation_evidence("e1", "https://example.org/one"),
+        citation_evidence("e2", "https://example.org/two"),
+    ]
+    first = project_citations(
+        [
+            citation("e2", "https://example.org/two", ["u1"]),
+            citation("e1", "https://example.org/one"),
+            citation("unknown", "https://example.org/unknown"),
+            citation("e2", "https://EXAMPLE.org:443/two/#quote", ["u1"]),
+        ],
+        evidence,
+        max_citations=4,
+    )
+    second = project_citations(
+        [
+            citation("e1", "https://example.org/one"),
+            citation("e2", "https://example.org/two", ["u1"]),
+        ],
+        list(reversed(evidence)),
+        max_citations=4,
+    )
+
+    assert [item.evidence_id for item in first] == ["e1", "e2"]
+    assert [item.evidence_id for item in second] == ["e1", "e2"]
+
+
+def test_project_citations_does_not_invent_missing_claim_unit_evidence() -> None:
+    evidence = [citation_evidence("e1", "https://example.org/one")]
+
+    projected = project_citations(
+        [citation("e1", "https://example.org/one", ["u0"])], evidence, max_citations=4
+    )
+
+    assert [item.evidence_id for item in projected] == ["e1"]
+    assert {unit for item in projected for unit in item.claim_unit_ids} == {"u0"}
+
+
+def test_project_citations_keeps_same_source_when_it_covers_distinct_units() -> None:
+    evidence = [citation_evidence("e1", "https://example.org/one")]
+    projected = project_citations(
+        [
+            citation("e1", "https://example.org/one", ["u0"]),
+            citation("e1", "https://example.org/one", ["u1"]),
+        ],
+        evidence,
+        max_citations=4,
+    )
+
+    assert len(projected) == 2
+    assert [item.claim_unit_ids for item in projected] == [["u0"], ["u1"]]
+
+
 @pytest.mark.asyncio
 async def test_decomposer_rejects_unknown_unit_reference() -> None:
     draft = DecompositionDraft(
@@ -238,7 +317,7 @@ async def test_judge_emits_citations_in_canonical_evidence_id_order() -> None:
     citations = [
         Citation(
             evidence_id="e2",
-            claim_unit_ids=["u0"],
+            claim_unit_ids=["u1"],
             question="q2",
             answer="a2",
             quote="quote2",

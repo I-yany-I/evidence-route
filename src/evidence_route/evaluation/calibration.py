@@ -300,6 +300,14 @@ def runtime_case_fingerprint(case: CalibrationRuntimeCase | Mapping[str, object]
     payload = (
         case.model_dump(mode="json") if isinstance(case, CalibrationRuntimeCase) else dict(case)
     )
+    # The marker was added after the frozen Gate A cases were written. An explicit false
+    # is equivalent to the legacy omitted field; a true recovery marker remains auditable.
+    for result_name in ("single_result", "multi_result"):
+        result = payload.get(result_name)
+        if isinstance(result, Mapping) and result.get("fallback_used") is False:
+            normalized_result = dict(result)
+            normalized_result.pop("fallback_used", None)
+            payload[result_name] = normalized_result
     payload.pop("artifact_sha256", None)
     return stable_hash(payload)
 

@@ -767,7 +767,9 @@ class ProductionCampaignService:
             calibration_config=calibration_config,
         )
         bounds = estimate_call_bounds(
-            compute_gate_a_call_profile(),
+            compute_gate_a_call_profile(
+                include_multi_recovery=app_config.hardening.multi_single_recovery
+            ),
             app_config.generation,
             pricing,
             reserve_ratio=app_config.budget.reserve_ratio,

@@ -79,6 +79,18 @@ def test_stability_v3_enables_worker_hardening_and_normalization(
     assert v3.hardening.normalize_output is True
 
 
+def test_stability_v4_enables_multi_single_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EVIDENCE_ROUTE_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("EVIDENCE_ROUTE_API_KEY", "test-key")
+    monkeypatch.setenv("EVIDENCE_ROUTE_MODEL", "relay-model")
+
+    v4 = load_app_config(Path("configs/stability-v4.yaml"))
+
+    assert v4.hardening.multi_single_recovery is True
+
+
 def test_hardening_fields_do_not_change_historical_routing_hash() -> None:
     assert stable_hash(RoutingSettings().model_dump(mode="json")) == stable_hash(
         {

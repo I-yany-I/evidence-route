@@ -161,6 +161,7 @@ class VerificationResult(StrictModel):
     available_evidence_ids: list[str] = Field(default_factory=list)
     initial_route: Literal["single", "multi"] | None
     escalated: bool = False
+    fallback_used: bool = False
     failure_stage: Literal["pre_route", "single", "decompose", "judge", "validation"] | None = None
     usage: Usage
     estimated_cost_micro_cny: int | None = Field(default=None, ge=0)
@@ -225,6 +226,7 @@ class VerificationState(TypedDict, total=False):
     draft_result: VerificationResult
     candidate_results: list[VerificationResult]
     draft_origin: Literal["single", "multi"]
+    fallback_used: bool
     validation_action: Literal["accept", "escalate", "fail"]
     node_timings: Annotated[list[NodeTiming], operator.add]
     escalated: bool

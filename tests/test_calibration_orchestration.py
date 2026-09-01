@@ -17,6 +17,7 @@ from evidence_route.evaluation.calibration import (
     build_calibration_state,
     derive_case_id,
     derive_run_id,
+    load_calibration_case,
     load_calibration_cases,
     load_calibration_plan,
     load_calibration_state,
@@ -160,6 +161,23 @@ def test_runtime_case_builder_seals_plan_identity(calibration_case) -> None:
     assert case.case_id == work.case_id
     assert case.requested_alias == plan.requested_alias
     assert case.artifact_sha256 == runtime_case_fingerprint(case)
+
+
+def test_load_legacy_case_without_fallback_marker_keeps_its_fingerprint(
+    tmp_path, calibration_case
+) -> None:
+    payload = calibration_case.runtime.model_dump(mode="json")
+    payload["single_result"].pop("fallback_used", None)
+    payload["multi_result"].pop("fallback_used", None)
+    payload["artifact_sha256"] = runtime_case_fingerprint(payload)
+    path = tmp_path / "legacy-case.json"
+    write_canonical_json(path, payload)
+
+    loaded = load_calibration_case(path)
+
+    assert loaded.artifact_sha256 == payload["artifact_sha256"]
+    assert loaded.single_result.fallback_used is False
+    assert loaded.multi_result.fallback_used is False
 
 
 @pytest.mark.parametrize("worker_count", [1, 2, 3])

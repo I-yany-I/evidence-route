@@ -269,6 +269,16 @@ def test_production_preview_does_not_construct_transport() -> None:
     assert payload["paid_execution_started"] is False
 
 
+def test_v4_preview_includes_recovery_call_allowance() -> None:
+    services = ProductionServices()
+    payload = services.preview_campaign(
+        config_path=Path("configs/stability-v4.yaml"),
+        pricing_path=Path("configs/pricing.dryrun.yaml"),
+    )
+
+    assert payload["base_call_upper_bound"] == 1664
+
+
 def test_paid_evaluate_requires_exactly_one_lifecycle_flag(tmp_path: Path) -> None:
     services = FakeServices()
     args = [

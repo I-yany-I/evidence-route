@@ -41,6 +41,7 @@ class GraphComponents:
     run_store: Any
     trace: Any
     adjudicator: Any | None = None
+    multi_single_recovery: bool = False
 
 
 class WorkerInput(TypedDict):
@@ -69,6 +70,7 @@ def initial_state(
         "status": RunStatus.RUNNING,
         "escalation_count": 0,
         "escalated": False,
+        "fallback_used": False,
         "execution_evidence_ids": set(),
         "worker_results": [],
         "candidate_results": [],
@@ -94,7 +96,11 @@ def fan_out_workers(state: VerificationState) -> list[Send]:
     ]
 
 
-def route_after_validation(state: VerificationState) -> Literal["decompose", "end"]:
+def route_after_validation(
+    state: VerificationState,
+) -> Literal["decompose", "recover_single", "end"]:
+    if state.get("validation_action") == "recover_single":
+        return "recover_single"
     return "decompose" if state.get("validation_action") == "escalate" else "end"
 
 
@@ -131,6 +137,12 @@ async def _worker_envelope(verifier: Any, payload: WorkerInput) -> VerificationE
     return VerificationEnvelope(
         result=await verifier.verify_task(*args), evidence_ids=frozenset()
     )
+
+
+async def _recovery_single_envelope(
+    verifier: Any, state: VerificationState
+) -> VerificationEnvelope:
+    return await _single_envelope(verifier, state)
 
 
 def make_analyze_node(components: GraphComponents):
@@ -195,6 +207,35 @@ def make_single_node(components: GraphComponents):
         }
 
     return single
+
+
+def make_single_recovery_node(components: GraphComponents):
+    async def single_recovery(state: VerificationState) -> dict[str, Any]:
+        envelope = await _recovery_single_envelope(components.single, state)
+        result = envelope.result.model_copy(
+            update={
+                "initial_route": "multi",
+                "fallback_used": True,
+                "escalated": False,
+                "errors": sorted(
+                    {
+                        *getattr(envelope.result, "errors", []),
+                        *state.get("errors", []),
+                        "MULTI_SINGLE_RECOVERY",
+                    }
+                ),
+            }
+        )
+        return {
+            "draft_result": result,
+            "draft_origin": "single",
+            "fallback_used": True,
+            "usage": result.usage,
+            "candidate_results": [result],
+            "execution_evidence_ids": set(envelope.evidence_ids),
+        }
+
+    return single_recovery
 
 
 def make_decompose_node(components: GraphComponents):
@@ -264,6 +305,7 @@ def make_validate_node(components: GraphComponents):
             escalation_count=state.get("escalation_count", 0),
             strategy=state["strategy"],
             draft_origin=state.get("draft_origin"),
+            fallback_used=state.get("fallback_used", False),
         )
         action = decision.action
         if isinstance(action, str):
@@ -273,6 +315,17 @@ def make_validate_node(components: GraphComponents):
                 "validation_action": "escalate",
                 "escalation_count": state.get("escalation_count", 0) + 1,
                 "escalated": True,
+                "errors": list(decision.errors),
+            }
+        if (
+            action is ValidationAction.FAIL
+            and state.get("route_decision").route == "multi"
+            and components.multi_single_recovery
+            and not state.get("fallback_used", False)
+        ):
+            return {
+                "validation_action": "recover_single",
+                "fallback_used": True,
                 "errors": list(decision.errors),
             }
         status = (
@@ -296,6 +349,7 @@ def build_graph(components: GraphComponents, *, checkpointer: Any):
     builder.add_node("analyze", make_analyze_node(components))
     builder.add_node("route", make_route_node(components))
     builder.add_node("single", make_single_node(components))
+    builder.add_node("single_recovery", make_single_recovery_node(components))
     builder.add_node("decompose", make_decompose_node(components))
     builder.add_node("worker", make_worker_node(components))
     builder.add_node("judge", make_judge_node(components))
@@ -308,12 +362,13 @@ def build_graph(components: GraphComponents, *, checkpointer: Any):
         {"single": "single", "decompose": "decompose", "end": END},
     )
     builder.add_edge("single", "validate")
+    builder.add_edge("single_recovery", "validate")
     builder.add_conditional_edges("decompose", fan_out_workers, ["worker"])
     builder.add_edge("worker", "judge")
     builder.add_edge("judge", "validate")
     builder.add_conditional_edges(
         "validate",
         route_after_validation,
-        {"decompose": "decompose", "end": END},
+        {"decompose": "decompose", "recover_single": "single_recovery", "end": END},
     )
     return builder.compile(checkpointer=checkpointer)

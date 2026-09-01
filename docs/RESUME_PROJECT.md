@@ -22,7 +22,7 @@
 
 简历中的质量、成本和延迟数字必须同时附带 cohort、完成率和模型身份限制；不能把 balanced subset 结果写成完整 AVeriTeC leaderboard 成绩。当前 adaptive stability 为 13/20 (65.0%)，低于项目定义的 85% 工程阈值，因此应把稳定性写成待改进项而不是已达标指标。
 
-## 稳定性 v2 实验结论
+## 稳定性迭代实验结论
 
 独立稳定性 v2 实验 `evidence-route-stability-v2-smoke-20260901` 已完成 280/280 个 work item。严格
 stability 为 11/20 (55.0%)，低于 17/20 门槛；adaptive dev full-manifest macro-F1 为 0.345、
@@ -35,13 +35,34 @@ v2 run-store 的 465 条调用全部为 completed，activity 汇总成本（含�
 为 CNY 81.811188；报告明确标记 relay model identity unverified。上述诊断用于说明下一步应
 优先收紧证据选择与引用绑定，不能代替严格 stability 指标。
 
+在此基础上，稳定性 v3 实验 `evidence-route-stability-v3-20260901` 引入了确定性 ambiguous
+路由、确定性 decomposition、hardened worker/judge、validator normalization、稳定 evidence
+排序、checkpoint 候选保存，以及 escalation 后的可选 adjudication。v3 已完成 280/280 个 work
+item，严格 stability 为 13/20 (65.0%)，相比 v2 的 11/20 有提升，但仍未达到 17/20 工程门槛。
+adaptive dev full-manifest macro-F1 为 0.351、完成率为 72.5%、相对 always_multi 的 token 降幅
+为 12.4%，因此仍低于 Gate A baseline 的 0.392、90.0% 和 21.8%，不应写成项目最终质量提升。
+
+v3 的 provider-free 诊断为 evidence/citation drift 6/20、incomplete/failed 2/20、provider
+variance 1/20；activity ledger 记录 624 次 fresh call、汇总成本 CNY 80.762184，usage 完整、
+无 billing uncertainty，响应模型仍是 relay self-reported、identity unverified。v3 报告位于
+`reports/evidence-route-stability-v3-20260901/`，它是稳定性工程迭代和失败分析，不覆盖 Gate A
+主结果。
+
+v4 已完成离线工程修复但尚未产生新的付费成绩：verifier 现在对模型引用执行证据感知的确定性
+projection，按冻结检索顺序、claim unit 和规范化来源 URL 去重；multi 在 worker 失败、coverage
+不足或低置信验证失败后最多执行一次 single recovery。recovery 会保留 `initial_route=multi`、
+设置 `fallback_used=true`、保留原始错误并写入 `MULTI_SINGLE_RECOVERY`，失败不会被伪装成成功。
+启用 v4 后，Gate A 规模预算预览的调用上界从旧配置的 1,544/3,088/9,264 增加到
+1,664/3,328/9,984；额外 single 调用已纳入预算和账本契约。当前仍需先完成 5-10 条付费 pilot，
+再根据真实 stability、completion 和质量决定是否重跑完整 280 项，因此不能把 v4 写成已达标结果。
+
 ## 90 秒面试讲法
 
 我做的是一个成本感知的事实核查 Agent。输入 claim 先做确定性分析和冻结证据 probe，再由 rule-first router 选择 single 或 multi。简单 claim 走一次核验；复杂或低置信场景才拆成最多三个并行 worker，再由 judge 聚合，single 只允许一次升级。这样路由策略的收益可以和 always-single、always-multi 在同一 manifest、同一模型配置下比较。
 
 我把难点放在可验证性而不是 prompt 堆叠上。运行侧只读 claim-only manifest，gold 和官方 evaluator 在 scorer 边界；每次模型调用写入 SQLite ledger，call ID、request fingerprint、usage、价格和响应模型 ID 都可回放。预算用整数 micro-CNY 预留，usage 或账单不完整就停止活动。最终报告要求完整 manifest 分母、失败惩罚和发布门禁，避免只挑成功样本报结果。
 
-当前公开的是 Gate A 的可审计实现和一次完整的冻结 provider 评测；provider 是 OpenAI-compatible relay，响应模型身份仍是 self-reported、identity unverified。报告同时保留 full-manifest 分数和 completed-only 官方分数，避免把 partial/failed 样本从分母中静默删除。后续 stability v2 实验没有达到严格门槛，因此简历继续使用已发布 Gate A baseline，并把新实验作为失败分析而不是成绩升级。
+当前公开的是 Gate A 的可审计实现和一次完整的冻结 provider 评测；provider 是 OpenAI-compatible relay，响应模型身份仍是 self-reported、identity unverified。报告同时保留 full-manifest 分数和 completed-only 官方分数，避免把 partial/failed 样本从分母中静默删除。后续 stability v2/v3 实验均没有达到严格门槛，v4 目前只有离线修复，因此简历继续使用已发布 Gate A baseline，并把稳定性迭代作为工程能力和失败分析，而不是成绩升级。
 
 ## 高频追问
 
@@ -63,16 +84,23 @@ runtime manifest 只保存 claim 和 corpus/evidence identity，不包含 label�
 
 ### 这个项目当前的限制是什么？
 
-当前是平衡冻结子集，不代表完整 AVeriTeC leaderboard；模型身份没有供应商认证；Gate B 的 MCP、中文案例和 Streamlit 尚未实现。正式 Gate A activity `evidence-route-gate-a-20260830-clean1` 已完成 calibration、dev 和 stability 三个阶段，campaign 为 **280/280 item complete**，账本为 **762 completed calls / CNY 87.5052**。Gate A adaptive stability 为 **13/20 (65.0%)**，v2 为 **11/20 (55.0%)**；两者都低于 85% 工程阈值，报告没有把稳定性包装成达标结果。
+当前是平衡冻结子集，不代表完整 AVeriTeC leaderboard；模型身份没有供应商认证；Gate B 的 MCP、中文案例和 Streamlit 尚未实现。正式 Gate A activity `evidence-route-gate-a-20260830-clean1` 已完成 calibration、dev 和 stability 三个阶段，campaign 为 **280/280 item complete**，账本为 **762 completed calls / CNY 87.5052**。Gate A adaptive stability 为 **13/20 (65.0%)**，v2 为 **11/20 (55.0%)**，v3 为 **13/20 (65.0%)**；三者都低于 85% 工程阈值，报告没有把稳定性包装成达标结果。
 
 ## 离线复现
 
 正式测评可以分批执行：`calibrate --collect --max-cases 4` 每次在完整 calibration case 保存后暂停，`evaluate --max-items 10` 每次在完整 work item 保存后暂停；下一次对同一 activity 使用 `--resume`。暂停是可恢复的执行状态，不是完整结果，也不会绕过 usage、预算、模型漂移或 billing uncertainty 门禁。
 
-稳定性 v2 实验与已发布 Gate A 分离：使用新的 `activity-id`、`campaign-id` 和 `--experiment-dir`，并通过
+稳定性 v2/v3 实验与已发布 Gate A 分离：使用新的 `activity-id`、`campaign-id` 和 `--experiment-dir`，并通过
 `--parent-activity`、`--parent-report` 指向 `evidence-route-gate-a-20260830-clean1` 的父基线。实验会在任何
 付费 transport 构造前核对父报告、manifest、pricing、config、prompt 和 stability manifest 的哈希；父 activity
 和历史 artifact 不会被覆盖。实验结果低于 17/20 稳定 claim 时，只能作为工程失败分析，不能写成达标指标。
+
+v3 activity 已经完成，报告和 provider-free stability diagnostics 位于
+`reports/evidence-route-stability-v3-20260901/`；它与 v2、Gate A 的 artifact 和账本目录相互隔离。
+
+v4 pilot 使用 `configs/stability-v4.yaml`，必须先执行离线预算预览，确认 recovery 调用已计入 cap，再使用
+新的 activity/campaign/experiment identity。旧 v3 activity 不能直接 resume 到 v4，因为配置和图行为
+已经改变；v4 pilot 低于 17/20 或 90% completion 时，只记录诊断并继续离线修复，不覆盖 Gate A 主结果。
 
 v2 activity 已经完成。下面的命令用于在同一 activity 上检查或复现可恢复批处理；`--max-items 10`
 可重复使用，每批在完整 item 落盘后暂停：

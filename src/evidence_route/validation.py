@@ -5,7 +5,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from evidence_route.contracts import ResultStatus, Strategy, Usage, Verdict, VerificationResult
-from evidence_route.evaluation.stability import canonicalize_citation_url
+from evidence_route.evaluation.stability import (
+    canonicalize_citation_http_url,
+    canonicalize_citation_url,
+)
+from evidence_route.verification import project_citations
 
 
 def adjudicate_verification_results(
@@ -37,21 +41,11 @@ def adjudicate_verification_results(
         return evidence_ids, citation_urls, candidate.rationale.strip(), -candidate.confidence
 
     selected = min(valid, key=key)
-    selected_citations = []
-    seen_evidence_ids: set[str] = set()
-    for citation in sorted(
+    selected_citations = project_citations(
         selected.citations,
-        key=lambda item: (item.evidence_id, str(item.source_url)),
-    ):
-        if citation.evidence_id not in seen_evidence_ids:
-            selected_citations.append(
-                citation.model_copy(
-                    update={
-                        "source_url": canonicalize_citation_url(str(citation.source_url))
-                    }
-                )
-            )
-            seen_evidence_ids.add(citation.evidence_id)
+        selected.available_evidence_ids,
+        max_citations=max(1, len(selected.citations)),
+    )
     verdicts = {candidate.verdict for candidate in valid}
     if len(verdicts) == 1:
         verdict = selected.verdict
@@ -116,7 +110,7 @@ def normalize_verification_result(result: VerificationResult) -> VerificationRes
     payload["available_evidence_ids"] = _normalize_strings(result.available_evidence_ids)
     payload["citations"] = [
         citation.model_copy(
-            update={"source_url": canonicalize_citation_url(str(citation.source_url))}
+            update={"source_url": canonicalize_citation_http_url(str(citation.source_url))}
         )
         for citation in result.citations
     ]
@@ -170,6 +164,7 @@ class ResultValidator:
         escalation_count: int,
         strategy: Strategy | str,
         draft_origin: str | None = None,
+        fallback_used: bool = False,
     ) -> ValidationDecision:
         normalized = normalize_verification_result(result) if self.normalize_output else result
         if normalized.status == ResultStatus.FAILED:
@@ -203,6 +198,7 @@ class ResultValidator:
             == Strategy.ADAPTIVE.value
             and (draft_origin or normalized.initial_route) == "single"
             and escalation_count == 0
+            and not fallback_used
         )
         if eligible:
             return ValidationDecision(ValidationAction.ESCALATE, normalized, tuple(errors))
