@@ -239,7 +239,14 @@ def create_experiment_identity(
     )
     metadata_path = output_dir / EXPERIMENT_METADATA_NAME
     if metadata_path.exists():
-        raise FileExistsError(f"experiment identity already exists: {metadata_path}")
+        existing = load_experiment_identity(output_dir)
+        if existing.model_dump(mode="json", exclude={"created_at"}) != identity.model_dump(
+            mode="json", exclude={"created_at"}
+        ):
+            raise FileExistsError(
+                f"experiment identity already exists with different frozen inputs: {metadata_path}"
+            )
+        return existing
     atomic_write_json(metadata_path, identity.model_dump(mode="json"))
     return identity
 

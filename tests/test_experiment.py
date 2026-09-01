@@ -77,6 +77,34 @@ def test_create_experiment_identity_persists_parent_hashes_and_schedule(tmp_path
     assert (tmp_path / "experiment" / "experiment.json").is_file()
 
 
+def test_create_experiment_identity_is_idempotent_for_matching_frozen_inputs(
+    tmp_path: Path,
+) -> None:
+    identity, inputs = _identity(tmp_path)
+
+    resumed = create_experiment_identity(
+        experiment_id=identity.experiment_id,
+        activity_id=identity.activity_id,
+        campaign_id=identity.campaign_id,
+        parent_activity_id=identity.parent_activity_id,
+        parent_report=inputs["report"],
+        parent_manifest=inputs["manifest"],
+        pricing=inputs["pricing"],
+        parent_config=inputs["config"],
+        config=inputs["config"],
+        prompt=inputs["prompt"],
+        stability_manifest=inputs["stability"],
+        repeat_schedule=identity.repeat_schedule,
+        requested_alias=identity.requested_alias,
+        response_model_id=identity.response_model_id,
+        identity_verified=identity.identity_verified,
+        output_dir=tmp_path / "experiment",
+        repeat_zero_artifact_sha256s=identity.repeat_zero_artifact_sha256s,
+    )
+
+    assert resumed == identity
+
+
 def test_create_experiment_identity_uses_prompt_hash_from_parent_report(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
     parent_prompt_hash = "a" * 64
