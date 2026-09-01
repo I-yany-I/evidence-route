@@ -228,18 +228,25 @@ def verify_current_freeze(
     deterministic and suitable for a resume audit log.
     """
 
+    allow_descendant_git = bool(kwargs.pop("allow_descendant_git", False))
     build_kwargs = dict(kwargs)
     build_kwargs.pop("repository_root", None)
     actual = build_freeze_identity(**build_kwargs)  # type: ignore[arg-type]
-    compare_freeze_identity(expected, actual)
+    comparable = (
+        actual.model_copy(update={"dev_protocol_git_sha": expected.dev_protocol_git_sha})
+        if allow_descendant_git
+        else actual
+    )
+    compare_freeze_identity(expected, comparable)
     repository_root = kwargs.get("repository_root")
     if repository_root is not None:
         verify_git_freeze(
             Path(repository_root),
             dev_protocol_git_sha=expected.dev_protocol_git_sha,
             manifest_freeze_git_sha=expected.manifest_freeze_git_sha,
+            allow_descendant_git=allow_descendant_git,
         )
-    return actual
+    return comparable
 
 
 def _git(repository_root: Path, *args: str) -> str:
@@ -270,6 +277,7 @@ def verify_git_freeze(
     *,
     dev_protocol_git_sha: str,
     manifest_freeze_git_sha: str,
+    allow_descendant_git: bool = False,
 ) -> str:
     """Require a clean tracked worktree at the protocol commit and an ancestor manifest commit."""
 
@@ -280,19 +288,26 @@ def verify_git_freeze(
     if status:
         raise FreezeMismatch("git_worktree_clean", expected=True, actual=False)
     head = git_head(root)
-    if head != dev_protocol_git_sha:
+    if head != dev_protocol_git_sha and not allow_descendant_git:
         raise FreezeMismatch("dev_protocol_git_sha", expected=dev_protocol_git_sha, actual=head)
-    try:
-        subprocess.run(
-            ["git", "merge-base", "--is-ancestor", manifest_freeze_git_sha, head],
-            cwd=root,
-            check=True,
-            capture_output=True,
-        )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise FreezeMismatch(
-            "manifest_freeze_git_sha", expected=manifest_freeze_git_sha, actual=head
-        ) from exc
+    ancestry_checks = [
+        ("manifest_freeze_git_sha", manifest_freeze_git_sha),
+        *(
+            [("dev_protocol_git_sha", dev_protocol_git_sha)]
+            if allow_descendant_git
+            else []
+        ),
+    ]
+    for label, ancestor in ancestry_checks:
+        try:
+            subprocess.run(
+                ["git", "merge-base", "--is-ancestor", ancestor, head],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise FreezeMismatch(label, expected=ancestor, actual=head) from exc
     return head
 
 

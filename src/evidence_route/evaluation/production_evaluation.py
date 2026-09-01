@@ -942,7 +942,11 @@ class ProductionCampaignService:
                 raise ValueError("activity campaign plan hash differs from persisted plan")
             if activity.campaign_state_sha256 != sha256_file(campaign_state_path):
                 raise ValueError("activity campaign state hash differs from persisted state")
-            current_freeze = verify_current_freeze(plan.freeze, **freeze_kwargs)
+            current_freeze = verify_current_freeze(
+                plan.freeze,
+                **freeze_kwargs,
+                allow_descendant_git=billing_recovery_requested,
+            )
 
         def build_executor() -> Any:
             nonlocal activity

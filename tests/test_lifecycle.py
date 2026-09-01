@@ -390,6 +390,42 @@ def test_resume_activity_after_billing_recovery_clears_only_billing_stop() -> No
     assert resumed.status is CampaignStatus.RUNNING
 
 
+def test_verify_current_freeze_allows_authorized_descendant_protocol_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = _files(tmp_path)
+    expected = build_freeze_identity(
+        calibration_manifest=files["calibration"],
+        dev_manifest=files["dev"],
+        stability_manifest=files["stability"],
+        corpus_receipt=files["receipt"],
+        prompt_bundle=files["prompts"],
+        config_file=files["config"],
+        pricing_file=files["pricing"],
+        requirements_lock=files["requirements"],
+        endpoint_config={"base_url": "https://relay.example/v1"},
+        requested_alias="relay-model",
+        seed=20260817,
+        manifest_freeze_git_sha="a" * 40,
+        dev_protocol_git_sha="b" * 40,
+    )
+    actual = expected.model_copy(update={"dev_protocol_git_sha": "c" * 40})
+    monkeypatch.setattr(
+        "evidence_route.evaluation.lifecycle.build_freeze_identity",
+        lambda **kwargs: actual,
+    )
+    monkeypatch.setattr(
+        "evidence_route.evaluation.lifecycle.verify_git_freeze",
+        lambda *args, **kwargs: "c" * 40,
+    )
+
+    assert verify_current_freeze(
+        expected,
+        repository_root=tmp_path,
+        allow_descendant_git=True,
+    ) == expected
+
+
 def test_verify_git_freeze_requires_clean_worktree_and_ancestor(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
