@@ -40,6 +40,7 @@ class GraphComponents:
     evidence_settings: Any
     run_store: Any
     trace: Any
+    adjudicator: Any | None = None
 
 
 class WorkerInput(TypedDict):
@@ -70,6 +71,7 @@ def initial_state(
         "escalated": False,
         "execution_evidence_ids": set(),
         "worker_results": [],
+        "candidate_results": [],
         "usage": Usage(input_tokens=0, output_tokens=0, total_tokens=0, complete=True),
         "node_timings": [],
         "errors": [],
@@ -188,6 +190,7 @@ def make_single_node(components: GraphComponents):
             "draft_result": result,
             "draft_origin": "single",
             "usage": result.usage,
+            "candidate_results": [result],
             "execution_evidence_ids": set(envelope.evidence_ids),
         }
 
@@ -230,6 +233,7 @@ def make_judge_node(components: GraphComponents):
             "draft_result": result,
             "draft_origin": "multi",
             "usage": result.usage,
+            "candidate_results": [*state.get("candidate_results", []), result],
             "execution_evidence_ids": set(state.get("execution_evidence_ids", set())),
         }
 
@@ -239,6 +243,19 @@ def make_judge_node(components: GraphComponents):
 def make_validate_node(components: GraphComponents):
     async def validate(state: ExecutionVerificationState) -> dict[str, Any]:
         result = state["draft_result"]
+        candidates = state.get("candidate_results", [])
+        can_adjudicate = (
+            len(candidates) > 1
+            and all(
+                candidate.status is ResultStatus.COMPLETED
+                and candidate.verdict is not None
+                and candidate.confidence is not None
+                and candidate.usage.complete
+                for candidate in candidates
+            )
+        )
+        if components.adjudicator is not None and can_adjudicate:
+            result = components.adjudicator(candidates)
         evidence_ids = set(state.get("execution_evidence_ids", set()))
         decision = components.validator.validate(
             result=result,

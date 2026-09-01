@@ -23,7 +23,13 @@ HARDENED_SINGLE_PROMPT = (
 DECOMPOSER_PROMPT = SYSTEM_PROMPT + " Decompose the claim into one to three atomic tasks."
 WORKER_PROMPT = SYSTEM_PROMPT + " Answer the assigned verification task."
 JUDGE_PROMPT = SYSTEM_PROMPT + " Judge the worker records and deduplicate their citations."
-HARDENED_PROMPT_VERSION = "2026-09-01-evidence-route-hardened-v1"
+HARDENED_WORKER_PROMPT = (
+    WORKER_PROMPT
+    + " Verify the full assigned verification task, including every clause, number, time scope,"
+    + " and comparison. If only part of the task is supported, return Not Enough Evidence."
+    + " Cite only listed evidence_id values and do not invent citations."
+)
+HARDENED_PROMPT_VERSION = "2026-09-01-evidence-route-stability-v3"
 HARDENED_JUDGE_PROMPT = (
     JUDGE_PROMPT
     + " Choose exactly one verdict from Supported, Refuted, Not Enough Evidence, or "
@@ -53,7 +59,7 @@ def hardened_prompt_hash() -> str:
         SYSTEM_PROMPT,
         HARDENED_SINGLE_PROMPT,
         DECOMPOSER_PROMPT,
-        WORKER_PROMPT,
+        HARDENED_WORKER_PROMPT,
         HARDENED_JUDGE_PROMPT,
     ]
     return hashlib.sha256("\n".join(values).encode("utf-8")).hexdigest()
@@ -113,6 +119,13 @@ def worker_messages(task: VerificationTask, evidence: list[Evidence]) -> list[di
             ),
         },
     ]
+
+
+def hardened_worker_messages(
+    task: VerificationTask, evidence: list[Evidence]
+) -> list[dict[str, str]]:
+    messages = worker_messages(task, evidence)
+    return [{"role": "system", "content": HARDENED_WORKER_PROMPT}, messages[1]]
 
 
 def _judge_messages(

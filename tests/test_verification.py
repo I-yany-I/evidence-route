@@ -12,7 +12,12 @@ from evidence_route.contracts import (
     Verdict,
     VerificationTask,
 )
-from evidence_route.verification import ClaimDecomposer, SingleVerifier, VerdictJudge
+from evidence_route.verification import (
+    ClaimDecomposer,
+    EvidenceWorker,
+    SingleVerifier,
+    VerdictJudge,
+)
 
 
 def features() -> ClaimFeatures:
@@ -119,6 +124,30 @@ async def test_hardened_single_verifier_uses_hardened_prompt() -> None:
     assert "full literal claim" in llm.messages[0][0]["content"]
 
 
+@pytest.mark.asyncio
+async def test_hardened_worker_uses_hardened_prompt() -> None:
+    task = VerificationTask(task_id="t0", claim_unit_ids=["u0"], query="claim")
+    llm = LLM(
+        type(
+            "Draft",
+            (),
+            {
+                "verdict": Verdict.NOT_ENOUGH_EVIDENCE,
+                "confidence": 0.9,
+                "citations": [],
+                "errors": [],
+            },
+        )()
+    )
+    worker = EvidenceWorker(
+        Provider(), llm, EvidenceSettings(), GenerationSettings(), hardened=True
+    )
+
+    await worker.verify_task_with_evidence("run", "dev-0", task)
+
+    assert "full assigned verification task" in llm.messages[0][0]["content"]
+
+
 def multi_features() -> ClaimFeatures:
     return features().model_copy(
         update={
@@ -202,3 +231,56 @@ async def test_judge_deduplicates_citations() -> None:
         "run", "dev-0", "claim", [worker], initial_route="multi", escalated=False
     )
     assert len(result.citations) == 1
+
+
+@pytest.mark.asyncio
+async def test_judge_emits_citations_in_canonical_evidence_id_order() -> None:
+    citations = [
+        Citation(
+            evidence_id="e2",
+            claim_unit_ids=["u0"],
+            question="q2",
+            answer="a2",
+            quote="quote2",
+            stance="supports",
+            source_url="https://example.org/2",
+        ),
+        Citation(
+            evidence_id="e1",
+            claim_unit_ids=["u0"],
+            question="q1",
+            answer="a1",
+            quote="quote1",
+            stance="supports",
+            source_url="https://example.org/1",
+        ),
+    ]
+    worker = type(
+        "Worker",
+        (),
+        {
+            "status": ResultStatus.COMPLETED,
+            "verdict": Verdict.SUPPORTED,
+            "confidence": 0.9,
+            "citations": [],
+            "available_evidence_ids": ["e1", "e2"],
+            "errors": [],
+            "usage": Usage(input_tokens=1, output_tokens=1, total_tokens=2, complete=True),
+        },
+    )()
+    draft = type(
+        "Draft",
+        (),
+        {
+            "verdict": Verdict.SUPPORTED,
+            "confidence": 0.9,
+            "rationale": "ok",
+            "citations": citations,
+        },
+    )()
+
+    result = await VerdictJudge(
+        LLM(draft), EvidenceSettings(), GenerationSettings()
+    ).judge("run", "dev-0", "claim", [worker], initial_route="multi", escalated=False)
+
+    assert [citation.evidence_id for citation in result.citations] == ["e1", "e2"]

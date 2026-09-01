@@ -35,7 +35,7 @@ from evidence_route.graph import GraphComponents, build_graph, initial_state
 from evidence_route.llm import OpenAITransport, StructuredLLM, ensure_v1
 from evidence_route.providers.averitec import AveritecFrozenProvider
 from evidence_route.routing import HybridRouter
-from evidence_route.validation import ResultValidator
+from evidence_route.validation import ResultValidator, adjudicate_verification_results
 from evidence_route.verification import (
     ClaimDecomposer,
     EvidenceWorker,
@@ -184,7 +184,13 @@ class ProductionServices:
                 app_config.generation,
                 deterministic=app_config.hardening.deterministic_decomposition,
             ),
-            worker=EvidenceWorker(provider, llm, app_config.evidence, app_config.generation),
+            worker=EvidenceWorker(
+                provider,
+                llm,
+                app_config.evidence,
+                app_config.generation,
+                hardened=app_config.hardening.hardened_worker,
+            ),
             judge=VerdictJudge(
                 llm,
                 app_config.evidence,
@@ -194,10 +200,16 @@ class ProductionServices:
             validator=ResultValidator(
                 low_confidence=app_config.routing.low_confidence,
                 minimum_coverage=app_config.routing.minimum_coverage,
+                normalize_output=app_config.hardening.normalize_output,
             ),
             evidence_settings=app_config.evidence,
             run_store=run_store,
             trace=TraceWriter(run_dir / "trace.jsonl"),
+            adjudicator=(
+                adjudicate_verification_results
+                if app_config.hardening.adjudication
+                else None
+            ),
         )
         graph_config = {"configurable": {"thread_id": run_id}}
         async with AsyncSqliteSaver.from_conn_string(str(checkpoint_db)) as saver:

@@ -191,6 +191,72 @@ def components(route="single", validator=None):
     )
 
 
+def test_graph_components_accept_an_optional_adjudicator() -> None:
+    values = components()
+
+    def adjudicator(candidates):
+        return candidates[-1]
+
+    configured = replace(values, adjudicator=adjudicator)
+
+    assert configured.adjudicator is adjudicator
+
+
+@pytest.mark.asyncio
+async def test_escalation_passes_single_and_multi_candidates_to_adjudicator() -> None:
+    candidates_seen = []
+
+    def adjudicator(candidates):
+        candidates_seen.append(candidates)
+        return candidates[-1]
+
+    validator = Validator(["escalate", "accept"])
+    graph = build_graph(
+        replace(components("single", validator), adjudicator=adjudicator),
+        checkpointer=InMemorySaver(),
+    )
+
+    state = await graph.ainvoke(
+        initial_state("run-adjudication", "dev-2", "Claim", Strategy.ADAPTIVE),
+        config={"configurable": {"thread_id": "run-adjudication"}},
+    )
+
+    assert len(candidates_seen) == 1
+    assert len(candidates_seen[0]) == 2
+    assert [candidate.initial_route for candidate in candidates_seen[0]] == ["single", "single"]
+    assert state["final_result"].status is ResultStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_adjudicator_does_not_promote_incomplete_candidates() -> None:
+    called = False
+
+    def adjudicator(candidates):
+        nonlocal called
+        called = True
+        raise AssertionError("incomplete candidates must not reach adjudicator")
+
+    validator = Validator(["escalate", "accept"])
+    values = components("single", validator)
+
+    class PartialJudge(Judge):
+        async def judge(self, run_id, claim_id, claim, workers, *, initial_route, escalated):
+            return result(claim_id, initial_route, escalated).model_copy(
+                update={"status": ResultStatus.PARTIAL}
+            )
+
+    state = await build_graph(
+        replace(values, judge=PartialJudge(), adjudicator=adjudicator),
+        checkpointer=InMemorySaver(),
+    ).ainvoke(
+        initial_state("run-adjudication-partial", "dev-2", "Claim", Strategy.ADAPTIVE),
+        config={"configurable": {"thread_id": "run-adjudication-partial"}},
+    )
+
+    assert called is False
+    assert state["final_result"].status is ResultStatus.PARTIAL
+
+
 def forged_components(single=None):
     values = components(validator=None)
     return GraphComponents(

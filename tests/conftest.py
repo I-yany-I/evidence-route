@@ -9,6 +9,24 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def isolate_provider_environment(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep unmarked tests independent from a user's live provider settings."""
+
+    allowed = any(request.node.get_closest_marker(name) for name in ("network", "live", "paid"))
+    if allowed:
+        return
+    for name in (
+        "EVIDENCE_ROUTE_API_KEY",
+        "EVIDENCE_ROUTE_BASE_URL",
+        "EVIDENCE_ROUTE_MODEL",
+        "EVIDENCE_ROUTE_PRICE_FILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def block_unmarked_network(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     allowed = any(request.node.get_closest_marker(name) for name in ("network", "live", "paid"))
     if allowed:

@@ -154,10 +154,14 @@ calibration 收集、保存结果 replay、冻结策略、三策略交错 dev、
 这里的结果不是官方 leaderboard 成绩。只有完整 campaign 通过发布门禁后，报告命令才会从
 `summary.json` 同步更新此区块和简历片段。
 
-独立稳定性加固实验 `evidence-route-hardening-20260901` 的严格 stability 为 14/20，低于 17/20
-工程门槛，且 adaptive dev 完成率和 full-manifest macro-F1 均未超过上述 baseline，因此只保留为
-工程失败分析，不覆盖本节结果。provider-free before/after、口径说明与账本核验位于
-`reports/evidence-route-hardening-20260901/stability_comparison.md`。
+独立稳定性 v2 实验 `evidence-route-stability-v2-smoke-20260901` 已完成 280/280 个 work item，
+但严格 stability 仅为 11/20 (55.0%)，低于 17/20 工程门槛。该实验的 adaptive dev
+full-manifest macro-F1 为 0.345、完成率为 82.5%，相对 always_multi 的 token 降幅为 6.6%，
+均未超过已发布 Gate A baseline，因此只保留为工程失败分析，不覆盖本节结果。诊断中最主要的
+问题是 evidence/citation drift (12/20)，另有 route drift (3/20)、validation/status drift
+(2/20)、incomplete/failed (2/20) 和 provider variance (1/20)。v2 run-store 的 465 条调用
+全部为 completed，activity 汇总成本（含继承的 calibration accounting）为 CNY 81.811188；
+完整报告位于 `reports/evidence-route-stability-v2-20260901/`。
 
 简历项目表述、90 秒讲法和常见追问见 [docs/RESUME_PROJECT.md](docs/RESUME_PROJECT.md)。其中明确区分了可复现工程上界与尚未生成的真实模型结果。
 

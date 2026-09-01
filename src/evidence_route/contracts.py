@@ -223,6 +223,7 @@ class VerificationState(TypedDict, total=False):
     tasks: list[VerificationTask]
     worker_results: Annotated[list[WorkerResult], operator.add]
     draft_result: VerificationResult
+    candidate_results: list[VerificationResult]
     draft_origin: Literal["single", "multi"]
     validation_action: Literal["accept", "escalate", "fail"]
     node_timings: Annotated[list[NodeTiming], operator.add]

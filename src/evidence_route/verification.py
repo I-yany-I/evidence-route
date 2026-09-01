@@ -25,6 +25,7 @@ from evidence_route.prompts import (
     decomposer_messages,
     hardened_judge_messages,
     hardened_single_messages,
+    hardened_worker_messages,
     judge_messages,
     single_messages,
     worker_messages,
@@ -232,11 +233,14 @@ class EvidenceWorker:
         llm: Any,
         evidence_settings: EvidenceSettings,
         generation: GenerationSettings,
+        *,
+        hardened: bool = False,
     ) -> None:
         self.provider = provider
         self.llm = llm
         self.evidence_settings = evidence_settings
         self.generation = generation
+        self.hardened = hardened
 
     async def verify_task(self, run_id: str, claim_id: str, task: VerificationTask) -> WorkerResult:
         envelope = await self.verify_task_with_evidence(run_id, claim_id, task)
@@ -256,7 +260,11 @@ class EvidenceWorker:
                 run_id=run_id,
                 node="worker",
                 task_id=task.task_id,
-                messages=worker_messages(task, evidence),
+                messages=(
+                    hardened_worker_messages(task, evidence)
+                    if self.hardened
+                    else worker_messages(task, evidence)
+                ),
                 schema=WorkerDraft,
                 max_input_tokens=self.generation.worker.max_input_tokens,
                 max_output_tokens=self.generation.worker.max_output_tokens,
@@ -322,7 +330,10 @@ class VerdictJudge:
         draft: VerdictDraft = response.value
         citations = []
         seen: set[str] = set()
-        for citation in _canonicalize_citations(draft.citations):
+        for citation in sorted(
+            _canonicalize_citations(draft.citations),
+            key=lambda item: (item.evidence_id, str(item.source_url)),
+        ):
             if (
                 citation.evidence_id not in seen
                 and len(citations) < self.evidence_settings.judge_max_evidence

@@ -2,12 +2,14 @@ from evidence_route.contracts import ClaimFeatures, ClaimUnit
 from evidence_route.prompts import (
     HARDENED_PROMPT_VERSION,
     HARDENED_SINGLE_PROMPT,
+    HARDENED_WORKER_PROMPT,
     JUDGE_PROMPT,
     PROMPT_VERSION,
     SYSTEM_PROMPT,
     hardened_judge_messages,
     hardened_prompt_hash,
     hardened_single_messages,
+    hardened_worker_messages,
     judge_messages,
     prompt_hash,
 )
@@ -59,4 +61,14 @@ def test_hardened_single_prompt_requires_support_for_the_full_literal_claim() ->
     assert "full literal claim" in prompt
     assert "part of the claim" in prompt
     assert "only reports that someone made the claim" in prompt
+    assert "Not Enough Evidence" in prompt
+
+
+def test_hardened_worker_prompt_requires_full_task_coverage() -> None:
+    task = type("Task", (), {"model_dump": lambda self, mode: {"task_id": "t0"}})()
+
+    prompt = hardened_worker_messages(task, [])[0]["content"]
+
+    assert prompt == HARDENED_WORKER_PROMPT
+    assert "full assigned verification task" in prompt
     assert "Not Enough Evidence" in prompt

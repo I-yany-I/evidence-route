@@ -37,6 +37,21 @@ def adjudicate_verification_results(
         return evidence_ids, citation_urls, candidate.rationale.strip(), -candidate.confidence
 
     selected = min(valid, key=key)
+    selected_citations = []
+    seen_evidence_ids: set[str] = set()
+    for citation in sorted(
+        selected.citations,
+        key=lambda item: (item.evidence_id, str(item.source_url)),
+    ):
+        if citation.evidence_id not in seen_evidence_ids:
+            selected_citations.append(
+                citation.model_copy(
+                    update={
+                        "source_url": canonicalize_citation_url(str(citation.source_url))
+                    }
+                )
+            )
+            seen_evidence_ids.add(citation.evidence_id)
     verdicts = {candidate.verdict for candidate in valid}
     if len(verdicts) == 1:
         verdict = selected.verdict
@@ -57,6 +72,7 @@ def adjudicate_verification_results(
         update={
             "verdict": verdict,
             "confidence": min(candidate.confidence for candidate in valid),
+            "citations": selected_citations,
             "available_evidence_ids": sorted(
                 {
                     evidence_id

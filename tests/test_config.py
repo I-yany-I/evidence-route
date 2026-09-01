@@ -66,6 +66,19 @@ def test_stability_v2_flags_are_opt_in(tmp_path: Path, monkeypatch: pytest.Monke
     assert v2.hardening.adjudication is True
 
 
+def test_stability_v3_enables_worker_hardening_and_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EVIDENCE_ROUTE_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("EVIDENCE_ROUTE_API_KEY", "test-key")
+    monkeypatch.setenv("EVIDENCE_ROUTE_MODEL", "relay-model")
+
+    v3 = load_app_config(Path("configs/stability-v3.yaml"))
+
+    assert v3.hardening.hardened_worker is True
+    assert v3.hardening.normalize_output is True
+
+
 def test_hardening_fields_do_not_change_historical_routing_hash() -> None:
     assert stable_hash(RoutingSettings().model_dump(mode="json")) == stable_hash(
         {

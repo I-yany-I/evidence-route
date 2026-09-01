@@ -35,7 +35,9 @@ class HardeningSettings(ConfigModel):
     deterministic_ambiguous: bool = False
     deterministic_decomposition: bool = False
     hardened_judge: bool = False
+    hardened_worker: bool = False
     adjudication: bool = False
+    normalize_output: bool = False
 
 
 class EvidenceSettings(ConfigModel):
