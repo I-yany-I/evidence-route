@@ -803,8 +803,21 @@ def _jsonable(value: object) -> object:
     return value
 
 
+def _normalize_fingerprint_compatibility(value: object) -> object:
+    if isinstance(value, Mapping):
+        normalized: dict[str, object] = {}
+        for key, item in value.items():
+            if key == "fallback_used" and item is False:
+                continue
+            normalized[str(key)] = _normalize_fingerprint_compatibility(item)
+        return normalized
+    if isinstance(value, list):
+        return [_normalize_fingerprint_compatibility(item) for item in value]
+    return value
+
+
 def _without_digest(value: object, field: str) -> object:
-    payload = _jsonable(value)
+    payload = _normalize_fingerprint_compatibility(_jsonable(value))
     if not isinstance(payload, dict):
         raise TypeError("fingerprint input must be a model or mapping")
     payload = copy.deepcopy(payload)

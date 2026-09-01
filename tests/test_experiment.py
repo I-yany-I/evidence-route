@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from evidence_route.evaluation.activity import FreezeMismatch
+from evidence_route.contracts import ResultStatus, Usage, Verdict, VerificationResult
+from evidence_route.evaluation.activity import (
+    FreezeMismatch,
+    LatencyBreakdown,
+    artifact_fingerprint,
+)
 from evidence_route.evaluation.experiment import (
     StabilityExperimentIdentity,
     create_experiment_identity,
@@ -247,6 +252,67 @@ def test_repeat_zero_reuse_requires_recorded_artifact_hash(tmp_path: Path) -> No
 
     with pytest.raises(FreezeMismatch):
         verify_repeat_zero_reuse(identity, {"claim-a": artifact})
+
+
+def test_repeat_zero_reuse_accepts_legacy_artifact_without_fallback_marker(
+    tmp_path: Path,
+) -> None:
+    identity, _ = _identity(tmp_path)
+    result = VerificationResult(
+        claim_id="claim-a",
+        status=ResultStatus.COMPLETED,
+        verdict=Verdict.SUPPORTED,
+        confidence=0.9,
+        rationale="supported",
+        initial_route="single",
+        usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2, complete=True),
+        estimated_cost_micro_cny=0,
+        cost_currency="CNY",
+        price_config_id="local",
+    )
+    payload = {
+        "schema_version": "1",
+        "activity_id": "activity",
+        "campaign_id": "campaign",
+        "phase": "dev",
+        "run_id": "a" * 64,
+        "claim_id": "claim-a",
+        "strategy": "always_single",
+        "repeat": 0,
+        "result": result.model_dump(mode="json"),
+        "call_ids": ["call-a"],
+        "usage": result.usage.model_dump(mode="json"),
+        "usage_source": "provider",
+        "actual_cost_micro_cny": 0,
+        "known_actual_cost_micro_cny": 0,
+        "committed_cost_micro_cny": 0,
+        "cost_is_lower_bound": False,
+        "fresh_call_count": 1,
+        "cache_hit_count": 0,
+        "requested_alias": "alias",
+        "response_model_ids_raw": ["relay"],
+        "identity_verified": False,
+        "billing_uncertain": False,
+        "diagnostic_only": False,
+        "latency": LatencyBreakdown(
+            fresh_end_to_end_ms=1,
+            model_active_ms=1,
+            retry_ms=0,
+            queue_ms=0,
+            checkpoint_downtime_ms=0,
+            total_elapsed_ms=1,
+            interruption_count=0,
+        ).model_dump(mode="json"),
+        "artifact_sha256": "0" * 64,
+    }
+    payload["result"].pop("fallback_used", None)
+    payload["artifact_sha256"] = artifact_fingerprint(payload)
+    artifact = _write(tmp_path / "claim-a.json", json.dumps(payload))
+    identity = identity.model_copy(
+        update={"repeat_zero_artifact_sha256s": {"claim-a": payload["artifact_sha256"]}}
+    )
+
+    verify_repeat_zero_reuse(identity, {"claim-a": artifact})
 
 
 def test_materialize_calibration_assets_copies_parent_without_rewriting_it(
