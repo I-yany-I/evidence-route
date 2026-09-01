@@ -127,6 +127,29 @@ def _phase_status(items: Sequence[tuple[CampaignWorkItem, Any]]) -> CampaignStat
     return CampaignStatus.PLANNED
 
 
+def _evaluation_activity_is_closed(
+    activity: Any, *, mode: str, experiment_mode: bool
+) -> bool:
+    resumable_stop_reasons = {
+        None,
+        CampaignStopReason.PROCESS_INTERRUPTION,
+        CampaignStopReason.USER_PAUSED,
+    }
+    billing_recovery_requested = (
+        mode == "resume" and experiment_mode and activity.billing_uncertain
+    )
+    return not (
+        activity.calibration_status is not CampaignStatus.COMPLETE
+        or (activity.billing_uncertain and not billing_recovery_requested)
+        or (mode == "start_after_calibration" and activity.stop_reason is not None)
+        or (
+            mode == "resume"
+            and activity.stop_reason not in resumable_stop_reasons
+            and not billing_recovery_requested
+        )
+    )
+
+
 class ProductionCampaignService:
     """Create, resume, and account for the production campaign."""
 
@@ -683,17 +706,14 @@ class ProductionCampaignService:
             or calibration_plan.activity_id != expected_calibration_activity
         ):
             raise ValueError("activity ID differs from calibration activity")
-        resumable_stop_reasons = {
-            None,
-            CampaignStopReason.PROCESS_INTERRUPTION,
-            CampaignStopReason.USER_PAUSED,
-        }
-        if (
-            activity.calibration_status is not CampaignStatus.COMPLETE
-            or (activity.billing_uncertain and not (mode == "resume" and experiment_mode))
-            or (mode == "start_after_calibration" and activity.stop_reason is not None)
-            or (mode == "resume" and activity.stop_reason not in resumable_stop_reasons)
-        ):
+        billing_recovery_requested = (
+            mode == "resume" and experiment_mode and activity.billing_uncertain
+        )
+        if not _evaluation_activity_is_closed(
+            activity,
+            mode=mode,
+            experiment_mode=experiment_mode,
+        ) and not billing_recovery_requested:
             raise ValueError("calibration activity is not closed")
 
         experiment_identity = None
@@ -799,9 +819,6 @@ class ProductionCampaignService:
             pricing=pricing,
         )
         authorized_recovery_call_ids: set[str] = set()
-        billing_recovery_requested = (
-            mode == "resume" and experiment_mode and activity.billing_uncertain
-        )
         if billing_recovery_requested:
             persisted_recovery_state = CampaignState.model_validate_json(
                 campaign_state_path.read_text(encoding="utf-8")
