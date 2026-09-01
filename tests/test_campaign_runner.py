@@ -177,6 +177,45 @@ async def test_campaign_runner_pauses_after_item_limit_and_resumes_without_repla
 
 
 @pytest.mark.asyncio
+async def test_repeated_resume_with_ledger_does_not_duplicate_completed_items(
+    tmp_path: Path, campaign_factory
+) -> None:
+    store = _run_store(tmp_path / "run-store.sqlite3", campaign_factory.plan().activity_id)
+    executors = [campaign_factory.executor() for _ in range(3)]
+
+    async def record(executor, item):
+        artifact = await executor(item)
+        _record_artifact_call(store, artifact)
+        return artifact
+
+    first = await CampaignRunner(
+        tmp_path,
+        lambda item: record(executors[0], item),
+        run_store=store,
+    ).run(campaign_factory.plan(), max_items=2)
+    second = await CampaignRunner(
+        tmp_path,
+        lambda item: record(executors[1], item),
+        run_store=store,
+    ).resume(max_items=2)
+    third = await CampaignRunner(
+        tmp_path,
+        lambda item: record(executors[2], item),
+        run_store=store,
+    ).resume(max_items=2)
+
+    assert first.status is CampaignStatus.PAUSED
+    assert second.status is CampaignStatus.PAUSED
+    assert third.status is CampaignStatus.PAUSED
+    assert [executor.calls for executor in executors] == [2, 2, 2]
+    assert sum(
+        len(store.summarize_run(item.run_id).call_ids)
+        for item in third.items[:6]
+    ) == 6
+    assert all(item.status is WorkStatus.COMPLETED for item in third.items[:6])
+
+
+@pytest.mark.asyncio
 async def test_campaign_runner_rejects_non_positive_item_limit(
     tmp_path: Path, campaign_factory
 ) -> None:
