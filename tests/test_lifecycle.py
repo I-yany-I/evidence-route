@@ -390,6 +390,40 @@ def test_resume_activity_after_billing_recovery_clears_only_billing_stop() -> No
     assert resumed.status is CampaignStatus.RUNNING
 
 
+def test_resume_activity_after_authorized_recovery_clears_usage_stop() -> None:
+    activity = build_initial_activity(
+        activity_id="activity-1",
+        calibration_plan_sha256="a" * 64,
+        calibration_state_sha256="b" * 64,
+        case_ids=[f"{index:064x}" for index in range(32)],
+    )
+    calibrated = mark_calibration_complete(
+        activity.model_copy(
+            update={
+                "calibration_artifacts": [
+                    CalibrationArtifactLink(case_id=f"{index:064x}", artifact_sha256="c" * 64)
+                    for index in range(32)
+                ]
+            },
+            deep=True,
+        )
+    )
+    stopped = transition_activity_phase(
+        calibrated,
+        phase="dev",
+        status=CampaignStatus.INCOMPLETE_USAGE,
+        stop_reason=CampaignStopReason.USAGE_MISSING,
+        billing_uncertain=False,
+    )
+
+    resumed = resume_activity_after_billing_recovery(stopped, phase="dev")
+
+    assert resumed.dev_status is CampaignStatus.RUNNING
+    assert resumed.stop_reason is None
+    assert resumed.billing_uncertain is False
+    assert resumed.status is CampaignStatus.RUNNING
+
+
 def test_verify_current_freeze_allows_authorized_descendant_protocol_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

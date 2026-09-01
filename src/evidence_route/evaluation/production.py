@@ -44,6 +44,12 @@ from evidence_route.verification import (
 )
 
 
+def checkpoint_thread_id(run_id: str, *, billing_recovery: bool = False) -> str:
+    """Keep recovery graphs isolated from the checkpoint of the interrupted attempt."""
+
+    return f"{run_id}::billing-recovery" if billing_recovery else run_id
+
+
 def _claim_id(value: object) -> str:
     claim_id = getattr(value, "claim_id", None)
     if claim_id is None and isinstance(value, dict):
@@ -248,6 +254,7 @@ class GraphCampaignExecutor:
         checkpoint_db: Path,
         trace_dir: Path,
         transport: Any | None = None,
+        billing_recovery_run_ids: set[str] | None = None,
     ) -> None:
         self.activity_id = activity_id
         self.campaign_id = campaign_id
@@ -259,6 +266,7 @@ class GraphCampaignExecutor:
         self.checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
         self.trace_dir = Path(trace_dir)
         self.trace_dir.mkdir(parents=True, exist_ok=True)
+        self.billing_recovery_run_ids = set(billing_recovery_run_ids or set())
 
         provider = AveritecFrozenProvider(corpus_dir)
         llm = StructuredLLM(
@@ -332,7 +340,13 @@ class GraphCampaignExecutor:
                 f"scheduled claim is absent from runtime manifests: {claim_id}"
             ) from exc
 
-        graph_config = {"configurable": {"thread_id": run_id}}
+        graph_config = {
+            "configurable": {
+                "thread_id": checkpoint_thread_id(
+                    run_id, billing_recovery=run_id in self.billing_recovery_run_ids
+                )
+            }
+        }
         async with AsyncSqliteSaver.from_conn_string(str(self.checkpoint_db)) as saver:
             saver.serde = JsonPlusSerializer(pickle_fallback=True)
             graph = build_graph(self.components, checkpointer=saver)
@@ -405,5 +419,6 @@ __all__ = [
     "GraphCampaignExecutor",
     "build_calibration_runtime_case",
     "build_campaign_plan",
+    "checkpoint_thread_id",
     "validate_gate_a_cohorts",
 ]

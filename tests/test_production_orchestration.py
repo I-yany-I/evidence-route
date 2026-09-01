@@ -9,6 +9,7 @@ import pytest
 from evidence_route.artifacts import RunCallSummary, SQLiteRunStore
 from evidence_route.budget import PriceConfig
 from evidence_route.config import GenerationSettings, load_app_config, stable_hash
+from evidence_route.evaluation import production as production_module
 from evidence_route.evaluation.activity import (
     CallBounds,
     CallProfile,
@@ -123,6 +124,14 @@ def test_campaign_batch_startup_cost_uses_strategy_specific_node_bounds() -> Non
         reserve_ratio=0.2,
         include_multi_recovery=True,
     ) == expected
+
+
+def test_billing_recovery_uses_a_fresh_checkpoint_namespace() -> None:
+    assert production_module.checkpoint_thread_id("run-1") == "run-1"
+    assert (
+        production_module.checkpoint_thread_id("run-1", billing_recovery=True)
+        == "run-1::billing-recovery"
+    )
 
 
 @pytest.mark.parametrize(

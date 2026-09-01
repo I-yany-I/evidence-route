@@ -743,7 +743,10 @@ class ProductionCampaignService:
         ):
             raise ValueError("activity ID differs from calibration activity")
         billing_recovery_requested = (
-            mode == "resume" and experiment_mode and activity.billing_uncertain
+            mode == "resume"
+            and experiment_mode
+            and activity.stop_reason
+            in {CampaignStopReason.BILLING_UNCERTAIN, CampaignStopReason.USAGE_MISSING}
         )
         if not _evaluation_activity_is_closed(
             activity,
@@ -857,12 +860,16 @@ class ProductionCampaignService:
             pricing=pricing,
         )
         authorized_recovery_call_ids: set[str] = set()
+        authorized_recovery_run_ids: set[str] = set()
         if billing_recovery_requested:
             persisted_recovery_state = CampaignState.model_validate_json(
                 campaign_state_path.read_text(encoding="utf-8")
             )
             for item in persisted_recovery_state.items:
-                if item.stop_reason is not CampaignStopReason.BILLING_UNCERTAIN:
+                if item.stop_reason not in {
+                    CampaignStopReason.BILLING_UNCERTAIN,
+                    CampaignStopReason.USAGE_MISSING,
+                }:
                     continue
                 unresolved = run_store.unresolved_call_states(item.run_id)
                 if not unresolved:
@@ -877,6 +884,7 @@ class ProductionCampaignService:
                             "for every unresolved call"
                         )
                     authorized_recovery_call_ids.add(call_id)
+                    authorized_recovery_run_ids.add(item.run_id)
             if not authorized_recovery_call_ids:
                 raise ValueError("billing recovery has no authorized calls")
         baseline_artifact_paths: dict[str, Path] = {}
@@ -1035,13 +1043,17 @@ class ProductionCampaignService:
                     stability_status = CampaignStatus.RUNNING
             elif (
                 billing_recovery_requested
-                and current.stop_reason is CampaignStopReason.BILLING_UNCERTAIN
+                and current.stop_reason
+                in {CampaignStopReason.BILLING_UNCERTAIN, CampaignStopReason.USAGE_MISSING}
             ):
                 recovery_phase = next(
                     phase
                     for phase in ("dev", "stability")
                     if getattr(current, f"{phase}_status")
-                    is CampaignStatus.INCOMPLETE_COST_UNCERTAIN
+                    in {
+                        CampaignStatus.INCOMPLETE_COST_UNCERTAIN,
+                        CampaignStatus.INCOMPLETE_USAGE,
+                    }
                 )
                 current = resume_activity_after_billing_recovery(
                     current, phase=recovery_phase
@@ -1080,6 +1092,7 @@ class ProductionCampaignService:
                 checkpoint_db=checkpoint_db,
                 trace_dir=activity_dir / "traces",
                 transport=transport,
+                billing_recovery_run_ids=authorized_recovery_run_ids,
             )
 
         runner = CampaignRunner(

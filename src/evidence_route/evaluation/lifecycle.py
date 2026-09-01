@@ -609,16 +609,22 @@ def resume_activity_phase(activity: ActivityRecord, *, phase: str) -> ActivityRe
 def resume_activity_after_billing_recovery(
     activity: ActivityRecord, *, phase: str
 ) -> ActivityRecord:
-    """Clear a billing stop only after an explicit ledger recovery decision."""
+    """Clear an authorized billing/usage stop after an explicit ledger decision."""
 
     if phase not in {"calibration", "dev", "stability"}:
         raise ValueError("activity phase must be calibration, dev, or stability")
-    if activity.stop_reason is not CampaignStopReason.BILLING_UNCERTAIN:
-        raise ValueError("activity is not stopped for billing uncertainty")
-    if not activity.billing_uncertain:
-        raise ValueError("billing recovery requires billing_uncertain=True")
-    if getattr(activity, f"{phase}_status") is not CampaignStatus.INCOMPLETE_COST_UNCERTAIN:
-        raise ValueError("phase is not stopped for billing uncertainty")
+    if activity.stop_reason is CampaignStopReason.BILLING_UNCERTAIN:
+        if not activity.billing_uncertain:
+            raise ValueError("billing recovery requires billing_uncertain=True")
+        expected_status = CampaignStatus.INCOMPLETE_COST_UNCERTAIN
+    elif activity.stop_reason is CampaignStopReason.USAGE_MISSING:
+        if activity.billing_uncertain:
+            raise ValueError("usage recovery cannot carry billing_uncertain=True")
+        expected_status = CampaignStatus.INCOMPLETE_USAGE
+    else:
+        raise ValueError("activity is not stopped for billing or usage recovery")
+    if getattr(activity, f"{phase}_status") is not expected_status:
+        raise ValueError("phase is not stopped for the expected recovery reason")
     updated = activity.model_copy(
         update={
             f"{phase}_status": CampaignStatus.RUNNING,
