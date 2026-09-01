@@ -16,9 +16,10 @@ from typing import Any
 from evidence_route.artifacts import CallState, SQLiteRunStore
 from evidence_route.budget import PriceConfig
 from evidence_route.config import AppConfig, load_app_config, stable_hash
-from evidence_route.contracts import Usage
+from evidence_route.contracts import Strategy, Usage
 from evidence_route.evaluation.activity import (
     ActivityRecord,
+    CallProfile,
     CampaignPlan,
     CampaignState,
     CampaignStatus,
@@ -69,6 +70,40 @@ from evidence_route.llm import OpenAITransport, ensure_v1, make_call_id
 
 TransportFactory = Callable[[Any], Any]
 ExecutorFactory = Callable[..., Any]
+
+
+def estimate_campaign_batch_startup(
+    items: Sequence[CampaignWorkItem],
+    *,
+    generation: Any,
+    pricing: PriceConfig,
+    reserve_ratio: float,
+    include_multi_recovery: bool,
+) -> int:
+    """Estimate the reserved startup cost for exactly the supplied campaign items."""
+
+    profile = CallProfile(router=0, single=0, decomposer=0, worker=0, judge=0)
+    recovery_single = int(include_multi_recovery)
+    for item in items:
+        if item.strategy is Strategy.ALWAYS_SINGLE:
+            item_profile = CallProfile(router=0, single=1, decomposer=0, worker=0, judge=0)
+        elif item.strategy is Strategy.ALWAYS_MULTI:
+            item_profile = CallProfile(router=0, single=0, decomposer=1, worker=3, judge=1)
+        else:
+            item_profile = CallProfile(
+                router=1,
+                single=1 + recovery_single,
+                decomposer=1,
+                worker=3,
+                judge=1,
+            )
+        profile = profile + item_profile
+    return estimate_call_bounds(
+        profile,
+        generation,
+        pricing,
+        reserve_ratio=reserve_ratio,
+    ).startup_required_micro_cny
 
 
 class _DeferredExecutor:
@@ -1048,7 +1083,16 @@ class ProductionCampaignService:
             )
 
         runner = CampaignRunner(
-            activity_dir, _DeferredExecutor(build_executor), run_store=run_store
+            activity_dir,
+            _DeferredExecutor(build_executor),
+            run_store=run_store,
+            startup_estimator=lambda items: estimate_campaign_batch_startup(
+                items,
+                generation=app_config.generation,
+                pricing=pricing,
+                reserve_ratio=app_config.budget.reserve_ratio,
+                include_multi_recovery=app_config.hardening.multi_single_recovery,
+            ),
         )
         state: CampaignState | None = None
         try:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -47,6 +47,7 @@ from evidence_route.evaluation.activity import (
 from evidence_route.llm import BillingUncertain
 
 Executor = Callable[[CampaignWorkItem], Awaitable[RunArtifact | Mapping[str, Any]]]
+StartupEstimator = Callable[[Sequence[CampaignWorkItem]], int]
 
 
 class CampaignProcessInterruption(RuntimeError):
@@ -244,10 +245,12 @@ class CampaignRunner:
         executor: Executor,
         *,
         run_store: SQLiteRunStore | None = None,
+        startup_estimator: StartupEstimator | None = None,
     ) -> None:
         self.root = Path(root)
         self.executor = executor
         self.run_store = run_store or getattr(executor, "run_store", None)
+        self.startup_estimator = startup_estimator
         self.plan_path = self.root / "plan.json"
         self.state_path = self.root / "campaign.json"
         self.artifact_dir = self.root / "artifacts"
@@ -317,6 +320,49 @@ class CampaignRunner:
                 expected=plan.cap_micro_cny,
                 actual=self.run_store.cap_micro_cny,
             )
+
+    @staticmethod
+    def _pending_work_items(
+        plan: CampaignPlan, state: CampaignState
+    ) -> list[CampaignWorkItem]:
+        terminal = {
+            WorkStatus.COMPLETED,
+            WorkStatus.PARTIAL,
+            WorkStatus.FAILED,
+            WorkStatus.NOT_RUN_BUDGET,
+            WorkStatus.CANCELLED,
+            WorkStatus.STOPPED,
+        }
+        return [
+            work
+            for work, item in zip(plan.schedule, state.items, strict=True)
+            if item.status not in terminal
+        ]
+
+    def _validate_startup_reservation(
+        self,
+        plan: CampaignPlan,
+        state: CampaignState,
+        *,
+        max_items: int | None,
+    ) -> None:
+        pending = self._pending_work_items(plan, state)
+        if not pending:
+            return
+        selected = pending if max_items is None else pending[:max_items]
+        if self.startup_estimator is None:
+            required = plan.call_bounds.startup_required_micro_cny
+        else:
+            required = self.startup_estimator(selected)
+            if not isinstance(required, int) or isinstance(required, bool) or required < 0:
+                raise ValueError("startup estimator must return a non-negative integer")
+        committed = (
+            self.run_store.summarize_activity().committed_cost_micro_cny
+            if self.run_store is not None
+            else 0
+        )
+        if committed + required > plan.cap_micro_cny:
+            raise BudgetExceeded("startup worst-case batch reservation exceeds campaign cap")
 
     @staticmethod
     def _verify_artifact_identity(
@@ -516,13 +562,12 @@ class CampaignRunner:
             raise FileExistsError("campaign directory contains an incomplete campaign journal")
         if plan_exists:
             raise FileExistsError("campaign directory already contains a persisted plan")
-        if plan.call_bounds.startup_required_micro_cny > plan.cap_micro_cny:
-            raise BudgetExceeded("startup worst-case reservation exceeds campaign cap")
         self._verify_run_store_identity(plan)
+        state = self._new_state(plan, initial_model_ids=initial_model_ids)
+        self._validate_startup_reservation(plan, state, max_items=max_items)
         self.root.mkdir(parents=True, exist_ok=True)
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         self._write_plan(plan)
-        state = self._new_state(plan, initial_model_ids=initial_model_ids)
         self._write_state(state)
         return await self._execute(plan, state, max_items=max_items)
 
@@ -535,8 +580,6 @@ class CampaignRunner:
     ) -> CampaignState:
         self._validate_max_items(max_items)
         plan = self._load_plan()
-        if plan.call_bounds.startup_required_micro_cny > plan.cap_micro_cny:
-            raise BudgetExceeded("startup worst-case reservation exceeds campaign cap")
         self._verify_run_store_identity(plan)
         if expected_identity is not None:
             compare_freeze_identity(plan.freeze, expected_identity)
@@ -560,6 +603,7 @@ class CampaignRunner:
             and self._requeue_authorized_billing_recovery(plan, state, authorized_call_ids or set())
         )
         if requeued_billing_recovery:
+            self._validate_startup_reservation(plan, state, max_items=max_items)
             return await self._execute(plan, state, max_items=max_items)
         if (
             persisted_reason is not None
@@ -601,6 +645,7 @@ class CampaignRunner:
                 state.stop_reason = None
                 state.status = CampaignStatus.RUNNING
                 self._write_state(state)
+                self._validate_startup_reservation(plan, state, max_items=max_items)
                 return await self._execute(plan, state, max_items=max_items)
             resumable = [
                 item
@@ -668,6 +713,7 @@ class CampaignRunner:
             state.stop_reason = None
             state.status = CampaignStatus.RUNNING
             self._write_state(state)
+        self._validate_startup_reservation(plan, state, max_items=max_items)
         return await self._execute(plan, state, max_items=max_items)
 
     async def resume_after_billing_recovery(

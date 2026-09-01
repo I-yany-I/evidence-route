@@ -7,9 +7,11 @@ from types import SimpleNamespace
 import pytest
 
 from evidence_route.artifacts import RunCallSummary, SQLiteRunStore
-from evidence_route.config import load_app_config, stable_hash
+from evidence_route.budget import PriceConfig
+from evidence_route.config import GenerationSettings, load_app_config, stable_hash
 from evidence_route.evaluation.activity import (
     CallBounds,
+    CallProfile,
     CampaignWorkItem,
     FreezeIdentity,
     Strategy,
@@ -21,6 +23,8 @@ from evidence_route.evaluation.production import (
     build_campaign_plan,
     validate_gate_a_cohorts,
 )
+from evidence_route.evaluation.production_evaluation import estimate_campaign_batch_startup
+from evidence_route.evaluation.runner import estimate_call_bounds
 from evidence_route.execution import load_price_config
 from evidence_route.llm import RawCompletion
 
@@ -83,6 +87,42 @@ def test_campaign_plan_uses_exact_stability_manifest_order() -> None:
     assert [link.claim_id for link in plan.stability_repeat_zero_links] == [
         item.claim_id for item in stability
     ]
+
+
+def test_campaign_batch_startup_cost_uses_strategy_specific_node_bounds() -> None:
+    dev = [SimpleNamespace(claim_id=f"dev-{index}") for index in range(80)]
+    stability = dev[:20]
+    plan = build_campaign_plan(
+        dev,
+        stability,
+        activity_id="activity",
+        campaign_id="campaign",
+        freeze=_freeze(),
+        cap_micro_cny=350_000_000,
+        call_bounds=_bounds(),
+    )
+    pricing = PriceConfig(
+        provider="fixture",
+        currency="CNY",
+        input_per_million=1,
+        output_per_million=2,
+        price_source="fixture",
+        strict_evaluation=True,
+    )
+    expected = estimate_call_bounds(
+        CallProfile(router=1, single=3, decomposer=2, worker=6, judge=2),
+        GenerationSettings(),
+        pricing,
+        reserve_ratio=0.2,
+    ).startup_required_micro_cny
+
+    assert estimate_campaign_batch_startup(
+        plan.schedule[:3],
+        generation=GenerationSettings(),
+        pricing=pricing,
+        reserve_ratio=0.2,
+        include_multi_recovery=True,
+    ) == expected
 
 
 @pytest.mark.parametrize(

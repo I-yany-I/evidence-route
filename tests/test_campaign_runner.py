@@ -9,6 +9,7 @@ from evidence_route.budget import PriceConfig, UsageUnavailable
 from evidence_route.config import GenerationSettings
 from evidence_route.contracts import Strategy
 from evidence_route.evaluation.activity import (
+    CampaignPlan,
     CampaignState,
     CampaignStatus,
     CampaignStopReason,
@@ -16,6 +17,7 @@ from evidence_route.evaluation.activity import (
     RunArtifact,
     WorkStatus,
     artifact_fingerprint,
+    campaign_fingerprint,
 )
 from evidence_route.evaluation.runner import (
     CampaignProcessInterruption,
@@ -181,6 +183,29 @@ async def test_campaign_runner_pauses_after_item_limit_and_resumes_without_repla
     assert all(
         item.status is WorkStatus.COMPLETED for item in resumed.items[:4]
     )
+
+
+@pytest.mark.asyncio
+async def test_batch_preflight_uses_current_batch_when_full_plan_reservation_is_over_cap(
+    tmp_path: Path, campaign_factory
+) -> None:
+    original = campaign_factory.plan()
+    payload = original.model_dump(mode="json")
+    payload["call_bounds"]["startup_required_micro_cny"] = original.cap_micro_cny + 1
+    payload["campaign_fingerprint"] = campaign_fingerprint(payload)
+    plan = CampaignPlan.model_validate(payload)
+    executor = campaign_factory.executor()
+    seen_batch: list[str] = []
+
+    state = await CampaignRunner(
+        tmp_path,
+        executor,
+        startup_estimator=lambda items: seen_batch.extend(item.run_id for item in items) or 100,
+    ).run(plan, max_items=2)
+
+    assert state.status is CampaignStatus.PAUSED
+    assert executor.calls == 2
+    assert seen_batch == [item.run_id for item in plan.schedule[:2]]
 
 
 @pytest.mark.asyncio
