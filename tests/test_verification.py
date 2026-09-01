@@ -56,6 +56,11 @@ class Provider:
         return evidence()
 
 
+class FailingProvider:
+    async def search(self, claim_id: str, query: str, *, top_k: int, max_chars: int):
+        raise ValueError("fixture corpus failure")
+
+
 class LLM:
     def __init__(self, value):
         self.value = value
@@ -147,6 +152,19 @@ async def test_hardened_worker_uses_hardened_prompt() -> None:
     await worker.verify_task_with_evidence("run", "dev-0", task)
 
     assert "full assigned verification task" in llm.messages[0][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_worker_failure_records_exception_type_for_diagnostics() -> None:
+    task = VerificationTask(task_id="t0", claim_unit_ids=["u0"], query="claim")
+    worker = EvidenceWorker(
+        FailingProvider(), LLM(object()), EvidenceSettings(), GenerationSettings()
+    )
+
+    envelope = await worker.verify_task_with_evidence("run", "dev-0", task)
+
+    assert envelope.result.status is ResultStatus.FAILED
+    assert envelope.result.errors == ["WORKER_VERIFICATION_FAILED:ValueError"]
 
 
 def multi_features() -> ClaimFeatures:

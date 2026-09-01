@@ -340,15 +340,16 @@ class GraphCampaignExecutor:
                 f"scheduled claim is absent from runtime manifests: {claim_id}"
             ) from exc
 
+        billing_recovery = run_id in self.billing_recovery_run_ids
         graph_config = {
             "configurable": {
-                "thread_id": checkpoint_thread_id(
-                    run_id, billing_recovery=run_id in self.billing_recovery_run_ids
-                )
+                "thread_id": checkpoint_thread_id(run_id, billing_recovery=billing_recovery)
             }
         }
         async with AsyncSqliteSaver.from_conn_string(str(self.checkpoint_db)) as saver:
             saver.serde = JsonPlusSerializer(pickle_fallback=True)
+            if billing_recovery:
+                await saver.adelete_thread(graph_config["configurable"]["thread_id"])
             graph = build_graph(self.components, checkpointer=saver)
             snapshot = await graph.aget_state(graph_config)
             values = getattr(snapshot, "values", None) or {}

@@ -376,7 +376,7 @@ class EvidenceWorker:
                     verdict=None,
                     confidence=None,
                     usage=Usage(input_tokens=0, output_tokens=0, total_tokens=0, complete=True),
-                    errors=["WORKER_VERIFICATION_FAILED"],
+                    errors=[f"WORKER_VERIFICATION_FAILED:{type(exc).__name__}"],
                 ),
                 evidence_ids=frozenset(),
             )
