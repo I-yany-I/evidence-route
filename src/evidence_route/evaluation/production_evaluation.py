@@ -13,7 +13,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from evidence_route.artifacts import SQLiteRunStore
+from evidence_route.artifacts import CallState, SQLiteRunStore
 from evidence_route.budget import PriceConfig
 from evidence_route.config import AppConfig, load_app_config, stable_hash
 from evidence_route.contracts import Usage
@@ -690,7 +690,7 @@ class ProductionCampaignService:
         }
         if (
             activity.calibration_status is not CampaignStatus.COMPLETE
-            or activity.billing_uncertain
+            or (activity.billing_uncertain and not (mode == "resume" and experiment_mode))
             or (mode == "start_after_calibration" and activity.stop_reason is not None)
             or (mode == "resume" and activity.stop_reason not in resumable_stop_reasons)
         ):
@@ -798,6 +798,32 @@ class ProductionCampaignService:
             run_store=calibration_run_store or run_store,
             pricing=pricing,
         )
+        authorized_recovery_call_ids: set[str] = set()
+        billing_recovery_requested = (
+            mode == "resume" and experiment_mode and activity.billing_uncertain
+        )
+        if billing_recovery_requested:
+            persisted_recovery_state = CampaignState.model_validate_json(
+                campaign_state_path.read_text(encoding="utf-8")
+            )
+            for item in persisted_recovery_state.items:
+                if item.stop_reason is not CampaignStopReason.BILLING_UNCERTAIN:
+                    continue
+                unresolved = run_store.unresolved_call_states(item.run_id)
+                if not unresolved:
+                    raise ValueError("billing recovery item has no unresolved ledger calls")
+                for call_id, call_state in unresolved.items():
+                    if (
+                        call_state is not CallState.RESERVED
+                        or run_store.get_billing_recovery_event(call_id) is None
+                    ):
+                        raise ValueError(
+                            "billing recovery requires explicit authorization "
+                            "for every unresolved call"
+                        )
+                    authorized_recovery_call_ids.add(call_id)
+            if not authorized_recovery_call_ids:
+                raise ValueError("billing recovery has no authorized calls")
         baseline_artifact_paths: dict[str, Path] = {}
         parent_state: CampaignState | None = None
         if experiment_mode:
@@ -988,10 +1014,17 @@ class ProductionCampaignService:
                     max_items=max_items,
                 )
             else:
-                state = await runner.resume(
-                    expected_identity=current_freeze,
-                    max_items=max_items,
-                )
+                if billing_recovery_requested:
+                    state = await runner.resume_after_billing_recovery(
+                        expected_identity=current_freeze,
+                        max_items=max_items,
+                        authorized_call_ids=authorized_recovery_call_ids,
+                    )
+                else:
+                    state = await runner.resume(
+                        expected_identity=current_freeze,
+                        max_items=max_items,
+                    )
             return {
                 "status": state.status.value,
                 "activity_id": activity_id,

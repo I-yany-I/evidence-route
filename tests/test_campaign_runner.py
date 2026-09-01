@@ -971,6 +971,71 @@ async def test_resume_audits_interrupted_run_ledger_before_executor(
 
 
 @pytest.mark.asyncio
+async def test_authorized_billing_recovery_requeues_stopped_item(
+    tmp_path: Path, campaign_factory
+) -> None:
+    plan = campaign_factory.plan()
+    store = _run_store(tmp_path / "run-store.sqlite3", plan.activity_id)
+    call_id: str | None = None
+    request_sha256: str | None = None
+    calls = 0
+
+    async def executor(item):
+        nonlocal calls, call_id, request_sha256
+        calls += 1
+        if calls == 1:
+            call_id = f"call-{item.run_id}"
+            request_sha256 = hashlib.sha256(call_id.encode()).hexdigest()
+            store.reserve_call(
+                call_id,
+                request_sha256=request_sha256,
+                run_id=item.run_id,
+                node="single",
+                task_id="root",
+                logical_attempt=0,
+                max_input_tokens=1,
+                max_output_tokens=1,
+            )
+            store.mark_sent(call_id)
+            store.mark_billing_uncertain(call_id)
+            raise BillingUncertain("fixture handoff")
+        artifact = await campaign_factory.executor()(item)
+        usage = artifact.usage
+        store.complete_call(
+            call_id,
+            request_sha256=request_sha256,
+            payload={"content": "fixture"},
+            usage=usage,
+            usage_source="provider",
+            requested_alias=plan.freeze.requested_alias,
+            response_model_id_raw="relay-a",
+            identity_verified=False,
+        )
+        return artifact
+
+    runner = CampaignRunner(tmp_path, executor, run_store=store)
+    first = await runner.run(plan, max_items=1)
+    assert first.stop_reason is CampaignStopReason.BILLING_UNCERTAIN
+
+    assert call_id is not None and request_sha256 is not None
+    store.authorize_billing_uncertain_retry(
+        call_id,
+        reason="fixture recovery authorization",
+        evidence="explicit test authorization",
+    )
+    resumed = await runner.resume_after_billing_recovery(
+        expected_identity=campaign_factory.freeze_identity(),
+        max_items=1,
+        authorized_call_ids={call_id},
+    )
+
+    assert resumed.items[0].status is WorkStatus.COMPLETED
+    assert resumed.stop_reason is CampaignStopReason.USER_PAUSED
+    assert resumed.billing_uncertain is False
+    assert calls == 2
+
+
+@pytest.mark.asyncio
 async def test_resume_audits_ledger_before_clearing_interruption(
     tmp_path: Path,
     campaign_factory,

@@ -31,10 +31,10 @@ from evidence_route.evaluation.calibration import (
     write_canonical_json,
 )
 from evidence_route.evaluation.lifecycle import load_activity, persist_activity, sha256_file
+from evidence_route.evaluation.production_evaluation import _validate_selected_routing_policy
 from evidence_route.evaluation.runner import CampaignProcessInterruption
 from evidence_route.execution import build_run_artifact, load_price_config
 from evidence_route.llm import RawCompletion
-from evidence_route.evaluation.production_evaluation import _validate_selected_routing_policy
 
 
 def _write_runtime_inputs(tmp_path: Path, *, cap_cny: float = 350.0) -> dict[str, Path]:

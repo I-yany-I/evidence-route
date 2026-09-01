@@ -430,7 +430,13 @@ class CampaignRunner:
                 "requested_aliases", [artifact.requested_alias], summary.requested_aliases
             )
 
-    def _verify_persisted_artifacts(self, plan: CampaignPlan, state: CampaignState) -> None:
+    def _verify_persisted_artifacts(
+        self,
+        plan: CampaignPlan,
+        state: CampaignState,
+        *,
+        allow_authorized_billing_recovery: set[str] | None = None,
+    ) -> None:
         for work, item in zip(plan.schedule, state.items, strict=True):
             path = self.root / item.artifact_relpath
             if item.artifact_sha256 is None:
@@ -452,7 +458,12 @@ class CampaignRunner:
                     actual=item.artifact_sha256,
                 )
             self._verify_artifact_identity(plan, work, artifact)
-            self._verify_run_store_accounting(artifact)
+            if not (
+                allow_authorized_billing_recovery
+                and item.stop_reason is CampaignStopReason.BILLING_UNCERTAIN
+                and artifact.diagnostic_only
+            ):
+                self._verify_run_store_accounting(artifact)
 
     def _refresh_summary(self, state: CampaignState) -> None:
         """Recompute accounting from immutable artifact files, never from counters."""
@@ -512,6 +523,7 @@ class CampaignRunner:
         *,
         expected_identity: FreezeIdentity | None = None,
         max_items: int | None = None,
+        authorized_call_ids: set[str] | None = None,
     ) -> CampaignState:
         self._validate_max_items(max_items)
         plan = self._load_plan()
@@ -524,10 +536,23 @@ class CampaignRunner:
         if state.activity_id != plan.activity_id or state.campaign_id != plan.campaign_id:
             raise ValueError("campaign state does not match persisted plan")
         self._verify_state_items(plan, state)
-        self._verify_persisted_artifacts(plan, state)
         persisted_reason = highest_stop_reason(
             [state.stop_reason, *(item.stop_reason for item in state.items)]
         )
+        recovery_requested = (
+            persisted_reason is CampaignStopReason.BILLING_UNCERTAIN and bool(authorized_call_ids)
+        )
+        self._verify_persisted_artifacts(
+            plan,
+            state,
+            allow_authorized_billing_recovery=(authorized_call_ids if recovery_requested else None),
+        )
+        requeued_billing_recovery = (
+            recovery_requested
+            and self._requeue_authorized_billing_recovery(plan, state, authorized_call_ids or set())
+        )
+        if requeued_billing_recovery:
+            return await self._execute(plan, state, max_items=max_items)
         if (
             persisted_reason is not None
             and persisted_reason
@@ -636,6 +661,57 @@ class CampaignRunner:
             state.status = CampaignStatus.RUNNING
             self._write_state(state)
         return await self._execute(plan, state, max_items=max_items)
+
+    async def resume_after_billing_recovery(
+        self,
+        *,
+        expected_identity: FreezeIdentity | None = None,
+        max_items: int | None = None,
+        authorized_call_ids: set[str],
+    ) -> CampaignState:
+        """Resume only after explicit authorization for every unresolved paid call."""
+
+        if not authorized_call_ids:
+            raise ValueError("billing recovery requires at least one authorized call")
+        return await self.resume(
+            expected_identity=expected_identity,
+            max_items=max_items,
+            authorized_call_ids=authorized_call_ids,
+        )
+
+    def _requeue_authorized_billing_recovery(
+        self,
+        plan: CampaignPlan,
+        state: CampaignState,
+        authorized_call_ids: set[str],
+    ) -> bool:
+        if self.run_store is None:
+            return False
+        recovery_items = [
+            (index, item)
+            for index, item in enumerate(state.items)
+            if item.stop_reason is CampaignStopReason.BILLING_UNCERTAIN
+        ]
+        if not recovery_items:
+            return False
+        for _index, item in recovery_items:
+            unresolved = self.run_store.unresolved_call_states(item.run_id)
+            if not unresolved or any(
+                call_state is not CallState.RESERVED
+                or call_id not in authorized_call_ids
+                or self.run_store.get_billing_recovery_event(call_id) is None
+                for call_id, call_state in unresolved.items()
+            ):
+                return False
+            item.status = WorkStatus.PENDING
+            item.stop_reason = None
+            item.artifact_sha256 = None
+            item.resumed_at = _now()
+        state.stop_reason = None
+        state.billing_uncertain = False
+        state.status = CampaignStatus.RUNNING
+        self._write_state(state)
+        return True
 
     async def _invoke(self, work: CampaignWorkItem) -> RunArtifact:
         result = self.executor(work)
