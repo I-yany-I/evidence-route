@@ -24,6 +24,7 @@ from evidence_route.config import (
     stable_hash,
 )
 from evidence_route.contracts import Strategy, StrictModel
+from evidence_route.evaluation.activity import CallProfile
 from evidence_route.evaluation.production_calibration import ProductionCalibrationCollector
 from evidence_route.evaluation.production_evaluation import ProductionCampaignService
 from evidence_route.evaluation.reporting import ReportInput, build_report_bundle
@@ -356,9 +357,31 @@ class ProductionServices:
             pricing,
             reserve_ratio=budget.reserve_ratio,
         )
+        max_items = kwargs.get("max_items", 10)
+        if (
+            not isinstance(max_items, int)
+            or isinstance(max_items, bool)
+            or max_items <= 0
+        ):
+            raise ValueError("max_items must be a positive integer")
+        batch_bounds = estimate_call_bounds(
+            CallProfile(
+                router=max_items,
+                single=(1 + int(hardening.multi_single_recovery)) * max_items,
+                decomposer=max_items,
+                worker=3 * max_items,
+                judge=max_items,
+            ),
+            generation,
+            pricing,
+            reserve_ratio=budget.reserve_ratio,
+        )
         return {
             **bounds.model_dump(mode="json"),
             "cap_micro_cny": int(budget.estimated_cost_cap_cny * 1_000_000),
+            "batch_max_items": max_items,
+            "batch_startup_required_micro_cny": batch_bounds.startup_required_micro_cny,
+            "batch_estimate_conservative": True,
             "paid_execution_started": False,
         }
 

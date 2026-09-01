@@ -274,9 +274,13 @@ def test_v4_preview_includes_recovery_call_allowance() -> None:
     payload = services.preview_campaign(
         config_path=Path("configs/stability-v4.yaml"),
         pricing_path=Path("configs/pricing.dryrun.yaml"),
+        max_items=10,
     )
 
     assert payload["base_call_upper_bound"] == 1664
+    assert payload["batch_max_items"] == 10
+    assert payload["batch_startup_required_micro_cny"] > 0
+    assert payload["batch_startup_required_micro_cny"] < payload["cap_micro_cny"]
 
 
 def test_paid_evaluate_requires_exactly_one_lifecycle_flag(tmp_path: Path) -> None:
