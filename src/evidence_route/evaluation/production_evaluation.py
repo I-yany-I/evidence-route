@@ -52,6 +52,7 @@ from evidence_route.evaluation.lifecycle import (
     git_head,
     load_activity,
     persist_activity,
+    resume_activity_after_billing_recovery,
     resume_activity_phase,
     seal_activity,
     sha256_file,
@@ -995,6 +996,23 @@ class ProductionCampaignService:
                     dev_status = CampaignStatus.RUNNING
                 else:
                     stability_status = CampaignStatus.RUNNING
+            elif (
+                billing_recovery_requested
+                and current.stop_reason is CampaignStopReason.BILLING_UNCERTAIN
+            ):
+                recovery_phase = next(
+                    phase
+                    for phase in ("dev", "stability")
+                    if getattr(current, f"{phase}_status")
+                    is CampaignStatus.INCOMPLETE_COST_UNCERTAIN
+                )
+                current = resume_activity_after_billing_recovery(
+                    current, phase=recovery_phase
+                )
+                if recovery_phase == "dev":
+                    dev_status = CampaignStatus.RUNNING
+                else:
+                    stability_status = CampaignStatus.RUNNING
             current = current.model_copy(
                 update={
                     "dev_status": dev_status,
@@ -1005,7 +1023,11 @@ class ProductionCampaignService:
                 deep=True,
             )
             current.status = derive_activity_status(
-                current.calibration_status, current.dev_status, current.stability_status
+                current.calibration_status,
+                current.dev_status,
+                current.stability_status,
+                stop_reason=current.stop_reason,
+                billing_uncertain=current.billing_uncertain,
             )
             activity = ActivityRecord.model_validate(current.model_dump(mode="python"))
             persist_activity(activity_path, activity)
