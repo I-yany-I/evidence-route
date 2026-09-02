@@ -746,7 +746,11 @@ class ProductionCampaignService:
             mode == "resume"
             and experiment_mode
             and activity.stop_reason
-            in {CampaignStopReason.BILLING_UNCERTAIN, CampaignStopReason.USAGE_MISSING}
+            in {
+                CampaignStopReason.BILLING_UNCERTAIN,
+                CampaignStopReason.USAGE_MISSING,
+                CampaignStopReason.INTERNAL_ERROR,
+            }
         )
         if not _evaluation_activity_is_closed(
             activity,
@@ -869,6 +873,7 @@ class ProductionCampaignService:
                 if item.stop_reason not in {
                     CampaignStopReason.BILLING_UNCERTAIN,
                     CampaignStopReason.USAGE_MISSING,
+                    CampaignStopReason.INTERNAL_ERROR,
                 }:
                     continue
                 unresolved = run_store.unresolved_call_states(item.run_id)
@@ -1044,7 +1049,11 @@ class ProductionCampaignService:
             elif (
                 billing_recovery_requested
                 and current.stop_reason
-                in {CampaignStopReason.BILLING_UNCERTAIN, CampaignStopReason.USAGE_MISSING}
+                in {
+                    CampaignStopReason.BILLING_UNCERTAIN,
+                    CampaignStopReason.USAGE_MISSING,
+                    CampaignStopReason.INTERNAL_ERROR,
+                }
             ):
                 recovery_phase = next(
                     phase
@@ -1053,6 +1062,7 @@ class ProductionCampaignService:
                     in {
                         CampaignStatus.INCOMPLETE_COST_UNCERTAIN,
                         CampaignStatus.INCOMPLETE_USAGE,
+                        CampaignStatus.FAILED,
                     }
                 )
                 current = resume_activity_after_billing_recovery(

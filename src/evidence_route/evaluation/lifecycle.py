@@ -621,8 +621,12 @@ def resume_activity_after_billing_recovery(
         if activity.billing_uncertain:
             raise ValueError("usage recovery cannot carry billing_uncertain=True")
         expected_status = CampaignStatus.INCOMPLETE_USAGE
+    elif activity.stop_reason is CampaignStopReason.INTERNAL_ERROR:
+        if activity.billing_uncertain:
+            raise ValueError("internal recovery cannot carry billing_uncertain=True")
+        expected_status = CampaignStatus.FAILED
     else:
-        raise ValueError("activity is not stopped for billing or usage recovery")
+        raise ValueError("activity is not stopped for an authorized recovery")
     if getattr(activity, f"{phase}_status") is not expected_status:
         raise ValueError("phase is not stopped for the expected recovery reason")
     updated = activity.model_copy(

@@ -592,7 +592,11 @@ class CampaignRunner:
         )
         recovery_requested = (
             persisted_reason
-            in {CampaignStopReason.BILLING_UNCERTAIN, CampaignStopReason.USAGE_MISSING}
+            in {
+                CampaignStopReason.BILLING_UNCERTAIN,
+                CampaignStopReason.USAGE_MISSING,
+                CampaignStopReason.INTERNAL_ERROR,
+            }
             and bool(authorized_call_ids)
         )
         self._verify_persisted_artifacts(
@@ -747,7 +751,11 @@ class CampaignRunner:
             (index, item)
             for index, item in enumerate(state.items)
             if item.stop_reason
-            in {CampaignStopReason.BILLING_UNCERTAIN, CampaignStopReason.USAGE_MISSING}
+            in {
+                CampaignStopReason.BILLING_UNCERTAIN,
+                CampaignStopReason.USAGE_MISSING,
+                CampaignStopReason.INTERNAL_ERROR,
+            }
         ]
         if not recovery_items:
             return False
