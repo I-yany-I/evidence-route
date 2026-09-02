@@ -170,6 +170,24 @@ def test_adjudication_preserves_distinct_claim_units_from_one_evidence_source() 
     assert len(adjudicated.citations) == 2
     assert [citation.claim_unit_ids for citation in adjudicated.citations] == [["u0"], ["u1"]]
 
+
+def test_validator_does_not_mark_distinct_claim_units_from_one_evidence_as_duplicate() -> None:
+    first = result_with(Verdict.SUPPORTED, "e1")
+    second = first.citations[0].model_copy(update={"claim_unit_ids": ["u1"]})
+    result = first.model_copy(
+        update={"citations": [first.citations[0], second]}
+    )
+
+    decision = ResultValidator(low_confidence=0.65, minimum_coverage=1.0).validate(
+        result=result,
+        claim_unit_ids=["u0", "u1"],
+        evidence_ids={"e1"},
+        escalation_count=0,
+        strategy="adaptive",
+    )
+
+    assert decision.action is ValidationAction.ACCEPT
+
 def test_normalize_verification_result_preserves_distinct_conflicting_verdict() -> None:
     result = valid_result().model_copy(
         update={"verdict": "Conflicting Evidence/Cherrypicking"}

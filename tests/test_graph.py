@@ -435,3 +435,23 @@ async def test_failed_single_recovery_remains_failed_and_is_not_retried() -> Non
     assert state["fallback_used"] is True
     assert state["final_result"].status is ResultStatus.FAILED
     assert state["final_result"].fallback_used is True
+
+
+@pytest.mark.asyncio
+async def test_escalated_multi_failure_also_uses_single_recovery() -> None:
+    single = RecoverySingle()
+    values = components("single", Validator(["escalate", "fail", "accept"]))
+    graph = build_graph(
+        replace(values, single=single, multi_single_recovery=True),
+        checkpointer=InMemorySaver(),
+    )
+
+    state = await graph.ainvoke(
+        initial_state("run-escalated-recovery", "dev-7", "Compound claim", Strategy.ADAPTIVE),
+        config={"configurable": {"thread_id": "run-escalated-recovery"}},
+    )
+
+    assert single.called == 2
+    assert state["final_result"].status is ResultStatus.COMPLETED
+    assert state["final_result"].initial_route == "multi"
+    assert state["final_result"].fallback_used is True

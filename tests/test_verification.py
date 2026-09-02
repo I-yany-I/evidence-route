@@ -18,6 +18,7 @@ from evidence_route.verification import (
     SingleVerifier,
     VerdictJudge,
     project_citations,
+    result_from_draft,
 )
 
 
@@ -256,6 +257,37 @@ def test_project_citations_keeps_same_source_when_it_covers_distinct_units() -> 
 
     assert len(projected) == 2
     assert [item.claim_unit_ids for item in projected] == [["u0"], ["u1"]]
+
+
+def test_result_from_draft_discards_unknown_claim_units_without_fabricating_coverage() -> None:
+    draft = type(
+        "Draft",
+        (),
+        {
+            "verdict": Verdict.SUPPORTED,
+            "confidence": 0.9,
+            "rationale": "supported",
+            "citations": [citation("e1", "https://example.org/one", ["u0", "u9"])],
+        },
+    )()
+    response = type(
+        "Response",
+        (),
+        {
+            "value": draft,
+            "usage": Usage(input_tokens=1, output_tokens=1, total_tokens=2, complete=True),
+        },
+    )()
+
+    result = result_from_draft(
+        response,
+        "dev-0",
+        "single",
+        [citation_evidence("e1", "https://example.org/one")],
+        known_claim_unit_ids=["u0"],
+    )
+
+    assert [item.claim_unit_ids for item in result.citations] == [["u0"]]
 
 
 @pytest.mark.asyncio

@@ -319,7 +319,7 @@ def make_validate_node(components: GraphComponents):
             }
         if (
             action is ValidationAction.FAIL
-            and state.get("route_decision").route == "multi"
+            and state.get("draft_origin") == "multi"
             and components.multi_single_recovery
             and not state.get("fallback_used", False)
         ):

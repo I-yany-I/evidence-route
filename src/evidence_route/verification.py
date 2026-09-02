@@ -65,6 +65,7 @@ def project_citations(
     evidence: Sequence[Evidence] | Sequence[str],
     *,
     max_citations: int,
+    known_claim_unit_ids: Sequence[str] | None = None,
 ) -> list[Citation]:
     """Project model citations onto a deterministic, evidence-backed representation."""
     if max_citations < 1:
@@ -82,14 +83,21 @@ def project_citations(
     else:
         raise TypeError("evidence must contain only Evidence records or evidence IDs")
     evidence_rank = {evidence_id: index for index, evidence_id in enumerate(ordered_ids)}
+    known_units = set(known_claim_unit_ids) if known_claim_unit_ids is not None else None
 
     candidates: list[tuple[tuple[object, ...], Citation, str]] = []
     for citation in citations:
         if citation.evidence_id not in evidence_rank:
             continue
+        claim_unit_ids = set(citation.claim_unit_ids)
+        if known_units is not None:
+            claim_unit_ids &= known_units
+        if not claim_unit_ids:
+            continue
         normalized = citation.model_copy(
             update={
-                "source_url": canonicalize_citation_http_url(str(citation.source_url))
+                "claim_unit_ids": sorted(claim_unit_ids),
+                "source_url": canonicalize_citation_http_url(str(citation.source_url)),
             }
         )
         source_url = canonicalize_citation_url(str(normalized.source_url))
@@ -155,6 +163,7 @@ def result_from_draft(
     evidence: list[Evidence],
     *,
     available_evidence_ids: list[str] | None = None,
+    known_claim_unit_ids: list[str] | None = None,
     escalated: bool = False,
 ) -> VerificationResult:
     draft: VerdictDraft = response.value
@@ -165,7 +174,10 @@ def result_from_draft(
         confidence=draft.confidence,
         rationale=draft.rationale,
         citations=project_citations(
-            draft.citations, evidence, max_citations=max(1, len(evidence))
+            draft.citations,
+            evidence,
+            max_citations=max(1, len(evidence)),
+            known_claim_unit_ids=known_claim_unit_ids,
         ),
         available_evidence_ids=available_evidence_ids or [item.evidence_id for item in evidence],
         initial_route=initial_route,
@@ -190,7 +202,10 @@ def worker_result_from_draft(
         verdict=draft.verdict,
         confidence=draft.confidence,
         citations=project_citations(
-            draft.citations, evidence, max_citations=max(1, len(evidence))
+            draft.citations,
+            evidence,
+            max_citations=max(1, len(evidence)),
+            known_claim_unit_ids=task.claim_unit_ids,
         ),
         available_evidence_ids=available_evidence_ids or [item.evidence_id for item in evidence],
         usage=_usage(response),
@@ -262,7 +277,13 @@ class SingleVerifier:
                 max_output_tokens=self.generation.single.max_output_tokens,
             )
             return VerificationEnvelope(
-                result=result_from_draft(response, claim_id, "single", evidence),
+                result=result_from_draft(
+                    response,
+                    claim_id,
+                    "single",
+                    evidence,
+                    known_claim_unit_ids=[item.unit_id for item in features.claim_units],
+                ),
                 evidence_ids=frozenset(item.evidence_id for item in evidence),
             )
         except Exception as exc:
@@ -423,10 +444,16 @@ class VerdictJudge:
         available = sorted(
             {evidence_id for worker in workers for evidence_id in worker.available_evidence_ids}
         )
+        worker_claim_unit_ids = {
+            unit_id
+            for worker in workers
+            for unit_id in getattr(worker, "claim_unit_ids", [])
+        }
         citations = project_citations(
             draft.citations,
             available,
             max_citations=self.evidence_settings.judge_max_evidence,
+            known_claim_unit_ids=sorted(worker_claim_unit_ids) or None,
         )
         usage = _usage(response)
         total_input = sum(worker.usage.input_tokens for worker in workers) + usage.input_tokens
