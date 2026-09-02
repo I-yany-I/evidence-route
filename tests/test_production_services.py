@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from evidence_route.artifacts import SQLiteRunStore
+from evidence_route.artifacts import CallState, SQLiteRunStore
 from evidence_route.budget import BudgetExceeded
 from evidence_route.cli import ProductionServices
 from evidence_route.config import stable_hash
@@ -32,6 +32,9 @@ from evidence_route.evaluation.calibration import (
     write_canonical_json,
 )
 from evidence_route.evaluation.lifecycle import load_activity, persist_activity, sha256_file
+from evidence_route.evaluation.production_calibration import (
+    _requeue_authorized_calibration_recovery,
+)
 from evidence_route.evaluation.production_evaluation import (
     _billing_recovery_items,
     _evaluation_activity_is_closed,
@@ -64,6 +67,37 @@ def test_billing_recovery_includes_running_item_after_process_kill() -> None:
         running,
         stopped,
     ]
+
+
+def test_authorized_calibration_recovery_requeues_stopped_case() -> None:
+    work = SimpleNamespace(
+        case_id="case-1",
+        router_run_id="router-1",
+        single_run_id="single-1",
+        multi_run_id="multi-1",
+    )
+    item = SimpleNamespace(
+        case_id="case-1",
+        status=CalibrationItemStatus.STOPPED,
+        errors=["BILLING_UNCERTAIN"],
+    )
+
+    class Store:
+        def unresolved_call_states(self, run_id: str) -> dict[str, CallState]:
+            if run_id == "single-1":
+                return {"call-1": CallState.RESERVED}
+            return {}
+
+        def get_billing_recovery_event(self, call_id: str) -> dict[str, str] | None:
+            return {"call_id": call_id, "action": "authorized_retry"}
+
+    recovered = _requeue_authorized_calibration_recovery(
+        SimpleNamespace(items=[work]), SimpleNamespace(items=[item]), Store()
+    )
+
+    assert recovered == ["case-1"]
+    assert item.status is CalibrationItemStatus.PENDING
+    assert item.errors == []
 
 
 def _write_runtime_inputs(tmp_path: Path, *, cap_cny: float = 350.0) -> dict[str, Path]:

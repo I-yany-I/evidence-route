@@ -193,7 +193,8 @@ class ResultValidator:
             cited_units.update(set(citation.claim_unit_ids) & units)
             seen_citations.add(citation_key)
         coverage = len(cited_units) / len(units) if units else 1.0
-        if coverage < self.minimum_coverage:
+        requires_full_coverage = normalized.verdict is not Verdict.NOT_ENOUGH_EVIDENCE
+        if requires_full_coverage and coverage < self.minimum_coverage:
             errors.append("INSUFFICIENT_COVERAGE")
         if normalized.confidence is None or normalized.confidence < self.low_confidence:
             errors.append("LOW_CONFIDENCE")

@@ -47,6 +47,7 @@ from evidence_route.evaluation.lifecycle import (
     load_activity,
     mark_calibration_complete,
     persist_activity,
+    resume_activity_after_billing_recovery,
     resume_activity_phase,
     sha256_file,
     transition_activity_phase,
@@ -148,6 +149,37 @@ def _sync_activity_journal_hashes(activity: Any, *, plan_path: Path, state_path:
         },
         deep=True,
     )
+
+
+def _requeue_authorized_calibration_recovery(
+    plan: CalibrationPlan, state: CalibrationState, run_store: SQLiteRunStore
+) -> list[str]:
+    """Requeue stopped calibration cases after every uncertain call is authorized."""
+
+    recovered: list[str] = []
+    for work, item in zip(plan.items, state.items, strict=True):
+        if item.status is not CalibrationItemStatus.STOPPED:
+            continue
+        unresolved: dict[str, CallState] = {}
+        for run_id in (work.router_run_id, work.single_run_id, work.multi_run_id):
+            unresolved.update(run_store.unresolved_call_states(run_id))
+        if not unresolved:
+            raise BillingStateError("billing recovery case has no unresolved calls")
+        for call_id, call_state in unresolved.items():
+            if (
+                call_state is not CallState.RESERVED
+                or run_store.get_billing_recovery_event(call_id) is None
+            ):
+                raise BillingStateError(
+                    "billing recovery requires explicit authorization for every unresolved call"
+                )
+        item.status = CalibrationItemStatus.PENDING
+        item.artifact_sha256 = None
+        item.errors = []
+        recovered.append(item.case_id)
+    if not recovered:
+        raise ValueError("billing recovery has no stopped calibration case")
+    return recovered
 
 
 def _request_fingerprints(run_store: SQLiteRunStore, call_ids: list[str]) -> dict[str, str]:
@@ -381,6 +413,12 @@ class ProductionCalibrationCollector:
         if resume:
             state = reconcile_calibration_state(activity_dir, plan, state, state_path=state_path)
             _verify_resume_ledger(activity_dir, plan, state, run_store)
+            if activity.stop_reason is CampaignStopReason.BILLING_UNCERTAIN:
+                _requeue_authorized_calibration_recovery(plan, state, run_store)
+                persist_calibration_state(state_path, state)
+                activity = resume_activity_after_billing_recovery(
+                    activity, phase="calibration"
+                )
             activity = self._link_reconciled_cases(activity, plan, state)
             if activity.stop_reason in {
                 CampaignStopReason.PROCESS_INTERRUPTION,

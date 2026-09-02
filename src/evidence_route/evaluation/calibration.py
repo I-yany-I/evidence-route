@@ -18,6 +18,7 @@ from evidence_route.config import (
     BudgetSettings,
     EvidenceSettings,
     GenerationSettings,
+    HardeningSettings,
     LLMSettings,
     RoutingSettings,
     stable_hash,
@@ -1137,7 +1138,7 @@ def _load_and_validate_file_config(path: Path | str) -> dict[str, object]:
         raise ValueError(f"configuration is not valid UTF-8 YAML: {source}") from exc
     if not isinstance(raw, dict):
         raise ValueError("configuration root must be a mapping")
-    allowed = {"llm", "routing", "evidence", "generation", "budget"}
+    allowed = {"llm", "routing", "hardening", "evidence", "generation", "budget"}
     unknown = set(raw) - allowed
     if unknown:
         raise ValueError(f"configuration contains unknown sections: {sorted(unknown)}")
@@ -1156,6 +1157,7 @@ def _load_and_validate_file_config(path: Path | str) -> dict[str, object]:
         }
     )
     RoutingSettings.model_validate(raw.get("routing") or {})
+    HardeningSettings.model_validate(raw.get("hardening") or {})
     EvidenceSettings.model_validate(raw.get("evidence") or {})
     GenerationSettings.model_validate(raw.get("generation") or {})
     BudgetSettings.model_validate(raw.get("budget") or {})

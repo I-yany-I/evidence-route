@@ -16,9 +16,16 @@ SINGLE_PROMPT = SYSTEM_PROMPT + " Verify the claim against the retrieved evidenc
 HARDENED_SINGLE_PROMPT = (
     SINGLE_PROMPT
     + " Verify the full literal claim, including every clause, number, time scope, and comparison."
-    + " Evidence that only reports that someone made the claim does not establish the claim itself"
-    + " unless the claim is explicitly about that report or quotation."
-    + " If only part of the claim is supported, return Not Enough Evidence."
+    + " For an attribution claim about whether a person said or wrote something, a direct"
+    + " transcript or report of that statement is evidence for the attribution; do not require"
+    + " independent proof"
+    + " of the underlying fact. For a substantive claim, evidence that only reports someone else's"
+    + " assertion does not establish the underlying fact."
+    + " Compare supporting and refuting evidence before choosing a verdict."
+    + " If evidence supports one part and refutes another, return Conflicting "
+    + "Evidence/Cherrypicking."
+    + " If only part of the claim is supported and the rest is unresolved, return Not Enough "
+    + "Evidence."
 )
 DECOMPOSER_PROMPT = SYSTEM_PROMPT + " Decompose the claim into one to three atomic tasks."
 WORKER_PROMPT = SYSTEM_PROMPT + " Answer the assigned verification task."
@@ -26,10 +33,18 @@ JUDGE_PROMPT = SYSTEM_PROMPT + " Judge the worker records and deduplicate their 
 HARDENED_WORKER_PROMPT = (
     WORKER_PROMPT
     + " Verify the full assigned verification task, including every clause, number, time scope,"
-    + " and comparison. If only part of the task is supported, return Not Enough Evidence."
+    + " and comparison. For an attribution claim about whether a person said or wrote something,"
+    + " a direct transcript or report of that statement is evidence for the attribution; do not"
+    + " require independent proof of the underlying fact. For a substantive claim, a source that"
+    + " only reports someone else's assertion does not establish the underlying fact."
+    + " Compare supporting and refuting evidence before choosing a verdict."
+    + " If evidence supports one part and refutes another, return Conflicting "
+    + "Evidence/Cherrypicking."
+    + " If only part of the task is supported and the rest is unresolved, return Not Enough "
+    + "Evidence."
     + " Cite only listed evidence_id values and do not invent citations."
 )
-HARDENED_PROMPT_VERSION = "2026-09-01-evidence-route-stability-v3"
+HARDENED_PROMPT_VERSION = "2026-09-02-averitec-verdict-semantics-v1"
 HARDENED_JUDGE_PROMPT = (
     JUDGE_PROMPT
     + " Choose exactly one verdict from Supported, Refuted, Not Enough Evidence, or "
@@ -37,6 +52,13 @@ HARDENED_JUDGE_PROMPT = (
     + " If the evidence is insufficient, the verdict must be Not Enough Evidence."
     + " If the evidence conflicts and cannot be resolved without cherry-picking, the verdict "
     + "must be Conflicting Evidence/Cherrypicking."
+    + " Compare supporting and refuting evidence across all worker records before choosing "
+    + "a verdict."
+    + " For attribution claims, distinguish whether the statement was made from whether the "
+    + "underlying statement is true."
+    + " If evidence supports one part and refutes another, return Conflicting "
+    + "Evidence/Cherrypicking; "
+    + "if the remaining part is merely unresolved, return Not Enough Evidence."
     + " Cite only evidence present in the worker records; do not invent citations."
 )
 

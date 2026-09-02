@@ -15,6 +15,7 @@ from evidence_route.contracts import (
     Evidence,
     ResultStatus,
     Usage,
+    Verdict,
     VerdictDraft,
     VerificationResult,
     VerificationTask,
@@ -464,7 +465,22 @@ class VerdictJudge:
             total_tokens=total_input + total_output,
             complete=all(worker.usage.complete for worker in workers) and usage.complete,
         )
-        partial = any(worker.status != ResultStatus.COMPLETED for worker in workers)
+        partial_workers = [
+            worker for worker in workers if worker.status is ResultStatus.PARTIAL
+        ]
+        recoverable_insufficient = bool(partial_workers) and all(
+            worker.verdict is Verdict.NOT_ENOUGH_EVIDENCE
+            and worker.usage.complete
+            for worker in partial_workers
+        )
+        partial = any(worker.status is ResultStatus.FAILED for worker in workers) or (
+            bool(partial_workers)
+            and not (
+                draft.verdict is Verdict.NOT_ENOUGH_EVIDENCE
+                and recoverable_insufficient
+                and result_usage.complete
+            )
+        )
         return VerificationResult(
             claim_id=claim_id,
             status=ResultStatus.PARTIAL if partial else ResultStatus.COMPLETED,

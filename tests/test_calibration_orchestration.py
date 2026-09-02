@@ -10,6 +10,7 @@ from evidence_route.evaluation.calibration import (
     CalibrationItemStatus,
     CalibrationPlan,
     CalibrationReplay,
+    _load_and_validate_file_config,
     begin_calibration_case,
     build_calibration_plan,
     build_calibration_replay,
@@ -39,6 +40,13 @@ pytest_plugins = ["tests.fixtures.evaluation.factories"]
 
 
 SHA = "a" * 64
+
+
+def test_replay_config_validation_accepts_hardening_section() -> None:
+    validated = _load_and_validate_file_config(Path("configs/stability-v4.yaml"))
+
+    assert validated["hardening"]["hardened_worker"] is True
+    assert validated["hardening"]["multi_single_recovery"] is True
 
 
 def _plan():

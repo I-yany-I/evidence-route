@@ -60,8 +60,21 @@ def test_hardened_single_prompt_requires_support_for_the_full_literal_claim() ->
     assert prompt == HARDENED_SINGLE_PROMPT
     assert "full literal claim" in prompt
     assert "part of the claim" in prompt
-    assert "only reports that someone made the claim" in prompt
+    assert "only reports someone else's assertion" in prompt
     assert "Not Enough Evidence" in prompt
+
+
+def test_hardened_prompts_distinguish_attribution_from_substantive_claims() -> None:
+    single = HARDENED_SINGLE_PROMPT
+    worker = HARDENED_WORKER_PROMPT
+
+    for prompt in (single, worker):
+        lowered = prompt.lower()
+        assert "attribution" in lowered
+        assert "said" in lowered
+        assert "underlying fact" in lowered
+        assert "compare supporting and refuting evidence" in lowered
+        assert "supports one part and refutes another" in lowered
 
 
 def test_hardened_worker_prompt_requires_full_task_coverage() -> None:

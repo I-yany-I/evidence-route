@@ -413,3 +413,38 @@ async def test_judge_emits_citations_in_canonical_evidence_id_order() -> None:
     ).judge("run", "dev-0", "claim", [worker], initial_route="multi", escalated=False)
 
     assert [citation.evidence_id for citation in result.citations] == ["e1", "e2"]
+
+
+@pytest.mark.asyncio
+async def test_judge_completes_insufficient_evidence_with_recoverable_partial_worker() -> None:
+    worker = type(
+        "Worker",
+        (),
+        {
+            "task_id": "t0",
+            "claim_unit_ids": ["u0"],
+            "status": ResultStatus.PARTIAL,
+            "verdict": Verdict.NOT_ENOUGH_EVIDENCE,
+            "confidence": 0.9,
+            "citations": [],
+            "available_evidence_ids": [],
+            "errors": ["INCOMPLETE_COVERAGE"],
+            "usage": Usage(input_tokens=1, output_tokens=1, total_tokens=2, complete=True),
+        },
+    )()
+    draft = type(
+        "Draft",
+        (),
+        {
+            "verdict": Verdict.NOT_ENOUGH_EVIDENCE,
+            "confidence": 0.9,
+            "rationale": "The available evidence is insufficient.",
+            "citations": [],
+        },
+    )()
+
+    result = await VerdictJudge(
+        LLM(draft), EvidenceSettings(), GenerationSettings()
+    ).judge("run", "dev-0", "claim", [worker], initial_route="multi", escalated=False)
+
+    assert result.status is ResultStatus.COMPLETED

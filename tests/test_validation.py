@@ -80,6 +80,66 @@ def test_second_invalid_result_becomes_failed() -> None:
     assert decision.result.verdict is None
 
 
+def test_not_enough_evidence_does_not_require_every_claim_unit_to_be_cited() -> None:
+    citation = Citation(
+        evidence_id="e1",
+        claim_unit_ids=["u0"],
+        question="What does the source establish?",
+        answer="The source addresses only the first part.",
+        quote="The source addresses only the first part.",
+        stance="insufficient",
+        source_url="https://example.org/source",
+    )
+    result = valid_result().model_copy(
+        update={
+            "verdict": Verdict.NOT_ENOUGH_EVIDENCE,
+            "citations": [citation],
+            "available_evidence_ids": ["e1"],
+        }
+    )
+
+    decision = ResultValidator(low_confidence=0.65, minimum_coverage=1.0).validate(
+        result=result,
+        claim_unit_ids=["u0", "u1"],
+        evidence_ids={"e1"},
+        escalation_count=1,
+        strategy="adaptive",
+    )
+
+    assert decision.action is ValidationAction.ACCEPT
+    assert decision.result.verdict is Verdict.NOT_ENOUGH_EVIDENCE
+
+
+def test_supported_result_still_requires_every_claim_unit_to_be_cited() -> None:
+    citation = Citation(
+        evidence_id="e1",
+        claim_unit_ids=["u0"],
+        question="What does the source establish?",
+        answer="The source establishes the first part.",
+        quote="The source establishes the first part.",
+        stance="supports",
+        source_url="https://example.org/source",
+    )
+    result = valid_result().model_copy(
+        update={
+            "verdict": Verdict.SUPPORTED,
+            "citations": [citation],
+            "available_evidence_ids": ["e1"],
+        }
+    )
+
+    decision = ResultValidator(low_confidence=0.65, minimum_coverage=1.0).validate(
+        result=result,
+        claim_unit_ids=["u0", "u1"],
+        evidence_ids={"e1"},
+        escalation_count=1,
+        strategy="adaptive",
+    )
+
+    assert decision.action is ValidationAction.FAIL
+    assert "INSUFFICIENT_COVERAGE" in decision.errors
+
+
 def test_partial_result_is_invalid_for_multi_recovery() -> None:
     result = valid_result().model_copy(update={"status": ResultStatus.PARTIAL})
 
