@@ -138,6 +138,21 @@ def _validate_selected_routing_policy(
         raise ValueError("calibration routing policy differs from selected candidate")
 
 
+def _billing_recovery_items(state: CampaignState) -> list[Any]:
+    """Return persisted items that may need billing recovery before resume."""
+
+    recovery_reasons = {
+        CampaignStopReason.BILLING_UNCERTAIN,
+        CampaignStopReason.USAGE_MISSING,
+        CampaignStopReason.INTERNAL_ERROR,
+    }
+    return [
+        item
+        for item in state.items
+        if item.stop_reason in recovery_reasons or item.status is WorkStatus.RUNNING
+    ]
+
+
 def _claim_map(manifest: Any) -> dict[str, str]:
     return {item.claim_id: item.claim for item in manifest.items}
 
@@ -869,15 +884,11 @@ class ProductionCampaignService:
             persisted_recovery_state = CampaignState.model_validate_json(
                 campaign_state_path.read_text(encoding="utf-8")
             )
-            for item in persisted_recovery_state.items:
-                if item.stop_reason not in {
-                    CampaignStopReason.BILLING_UNCERTAIN,
-                    CampaignStopReason.USAGE_MISSING,
-                    CampaignStopReason.INTERNAL_ERROR,
-                }:
-                    continue
+            for item in _billing_recovery_items(persisted_recovery_state):
                 unresolved = run_store.unresolved_call_states(item.run_id)
                 if not unresolved:
+                    if item.status is WorkStatus.RUNNING:
+                        continue
                     if item.stop_reason is CampaignStopReason.INTERNAL_ERROR:
                         authorized_recovery_run_ids.add(item.run_id)
                         continue

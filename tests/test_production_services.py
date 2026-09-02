@@ -22,6 +22,7 @@ from evidence_route.evaluation.activity import (
     CampaignStopReason,
     LatencyBreakdown,
     RunArtifact,
+    WorkStatus,
 )
 from evidence_route.evaluation.calibration import (
     CalibrationItemStatus,
@@ -32,6 +33,7 @@ from evidence_route.evaluation.calibration import (
 )
 from evidence_route.evaluation.lifecycle import load_activity, persist_activity, sha256_file
 from evidence_route.evaluation.production_evaluation import (
+    _billing_recovery_items,
     _evaluation_activity_is_closed,
     _validate_selected_routing_policy,
 )
@@ -48,6 +50,20 @@ def test_experiment_billing_recovery_activity_is_resumable() -> None:
     )
 
     assert _evaluation_activity_is_closed(activity, mode="resume", experiment_mode=True)
+
+
+def test_billing_recovery_includes_running_item_after_process_kill() -> None:
+    running = SimpleNamespace(status=WorkStatus.RUNNING, stop_reason=None)
+    pending = SimpleNamespace(status=WorkStatus.PENDING, stop_reason=None)
+    stopped = SimpleNamespace(
+        status=WorkStatus.STOPPED,
+        stop_reason=CampaignStopReason.BILLING_UNCERTAIN,
+    )
+
+    assert _billing_recovery_items(SimpleNamespace(items=[running, pending, stopped])) == [
+        running,
+        stopped,
+    ]
 
 
 def _write_runtime_inputs(tmp_path: Path, *, cap_cny: float = 350.0) -> dict[str, Path]:

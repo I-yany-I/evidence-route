@@ -701,6 +701,10 @@ class CampaignRunner:
             self._write_state(state)
         if running_item is not None and self.run_store is not None:
             unresolved = self.run_store.unresolved_call_states(running_item.run_id)
+            for call_id, call_state in unresolved.items():
+                if call_state is CallState.SENT:
+                    self.run_store.mark_billing_uncertain(call_id)
+            unresolved = self.run_store.unresolved_call_states(running_item.run_id)
             unresolved_states = set(unresolved.values())
             reason: CampaignStopReason | None = None
             if unresolved_states & {CallState.SENT, CallState.BILLING_UNCERTAIN}:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from evidence_route.artifacts import BillingStateError, SQLiteRunStore, atomic_write_json
+from evidence_route.artifacts import CallState, BillingStateError, SQLiteRunStore, atomic_write_json
 from evidence_route.budget import PriceConfig, UsageUnavailable
 from evidence_route.config import GenerationSettings
 from evidence_route.contracts import Strategy
@@ -1038,6 +1038,9 @@ async def test_resume_audits_interrupted_run_ledger_before_executor(
     assert resumed.items[0].status is WorkStatus.STOPPED
     assert resumed.items[0].stop_reason is expected_reason
     assert resumed.items[0].artifact_sha256 is not None
+    if unresolved_state == "sent":
+        unresolved = store.unresolved_call_states(resumed.items[0].run_id)
+        assert set(unresolved.values()) == {CallState.BILLING_UNCERTAIN}
     assert executor.calls == 0
 
 
