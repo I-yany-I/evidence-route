@@ -181,7 +181,10 @@ item，但 adaptive 严格稳定性为 11/20 (55.0%)、完成率 80.0%、full-ma
 随后修复了 partial multi 未进入 recovery、跨 claim unit 误判重复引用和未知 claim unit 引用泄漏，
 并以独立 activity `evidence-route-stability-v4-1-pilot-20260902` 完成首批 10 个 work item：
 9 个 completed、1 个 failed、0 个 partial，3 个结果使用 recovery，24 个调用全部结账，成本为
-CNY 3.962016。该批次样本不足以证明 17/20 稳定性门槛，只用于验证状态机和账务闭环。
+CNY 3.962016；随后在独立 `evidence-route-stability-v4-2-pilot-20260902` 重跑同一批次，
+达到 10/10 completed、0 partial、0 failed，4 个结果使用 recovery，24 个调用全部结账，成本为
+CNY 3.913560。两批是同一前 10 个 work item 的工程回归样本，不能证明 17/20 stability 门槛，
+只用于验证状态机和账务闭环。
 启用 recovery 后 Gate A 规模的 base/repair/fault 上界为 `1664/3328/9984`，相比旧配置的
 `1544/3088/9264` 多出的调用是 recovery 预留，不是实际已发生费用。
 

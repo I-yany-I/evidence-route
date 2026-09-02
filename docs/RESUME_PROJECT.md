@@ -56,8 +56,10 @@ v4 已完成工程修复和完整付费 pilot：verifier 现在对模型引用�
 full-manifest macro-F1 0.375，仍低于项目门槛。
 随后修复了 partial multi 未触发 recovery、跨 claim unit 误判重复引用及未知 claim unit 引用边界，
 并在独立 `evidence-route-stability-v4-1-pilot-20260902` 中完成首批 10 个 work item：9 个
-completed、1 个 failed、0 个 partial，3 个 recovery，24 个调用全部结账，成本 CNY 3.962016。
-这是状态机回归验证，不是新的稳定性成绩。
+completed、1 个 failed、0 个 partial，3 个 recovery，24 个调用全部结账，成本 CNY 3.962016；
+随后在独立 `evidence-route-stability-v4-2-pilot-20260902` 重跑同一批次，达到 10/10 completed、
+0 partial、0 failed，4 个 recovery，24 个调用全部结账，成本 CNY 3.913560。这两批是状态机
+回归验证，不是新的稳定性成绩。
 启用 v4 后，Gate A 规模预算预览的调用上界从旧配置的 1,544/3,088/9,264 增加到
 1,664/3,328/9,984；额外 single 调用已纳入预算和账本契约。当前仍需先完成 5-10 条付费 pilot，
 再根据真实 stability、completion 和质量决定是否重跑完整 280 项，因此不能把 v4 写成已达标结果。
