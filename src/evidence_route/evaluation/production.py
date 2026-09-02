@@ -255,6 +255,7 @@ class GraphCampaignExecutor:
         trace_dir: Path,
         transport: Any | None = None,
         billing_recovery_run_ids: set[str] | None = None,
+        authorized_recovery_call_ids: set[str] | None = None,
     ) -> None:
         self.activity_id = activity_id
         self.campaign_id = campaign_id
@@ -267,12 +268,15 @@ class GraphCampaignExecutor:
         self.trace_dir = Path(trace_dir)
         self.trace_dir.mkdir(parents=True, exist_ok=True)
         self.billing_recovery_run_ids = set(billing_recovery_run_ids or set())
+        self.authorized_recovery_call_ids = set(authorized_recovery_call_ids or set())
 
         provider = AveritecFrozenProvider(corpus_dir)
         llm = StructuredLLM(
             settings=app_config.llm,
             transport=transport or OpenAITransport(app_config.llm),
             run_store=run_store,
+            recovery_run_ids=self.billing_recovery_run_ids,
+            authorized_recovery_call_ids=self.authorized_recovery_call_ids,
         )
         self.provider = provider
         self.components = GraphComponents(

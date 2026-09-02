@@ -66,11 +66,15 @@ class StructuredLLM:
         transport: AsyncTransport,
         run_store: SQLiteRunStore,
         sleeper: Any = asyncio.sleep,
+        recovery_run_ids: set[str] | None = None,
+        authorized_recovery_call_ids: set[str] | None = None,
     ) -> None:
         self.settings = settings
         self.transport = transport
         self.run_store = run_store
         self.sleeper = sleeper
+        self.recovery_run_ids = set(recovery_run_ids or set())
+        self.authorized_recovery_call_ids = set(authorized_recovery_call_ids or set())
 
     async def invoke(
         self,
@@ -95,6 +99,7 @@ class StructuredLLM:
             max_output_tokens=max_output_tokens,
             logical_attempt=0,
             allow_repair=allow_repair,
+            recovery_rebase=True,
         )
 
     def _with_schema_instruction(
@@ -128,7 +133,15 @@ class StructuredLLM:
         max_output_tokens: int,
         logical_attempt: int,
         allow_repair: bool,
+        recovery_rebase: bool,
     ) -> StructuredResult[T]:
+        base_call_id = make_call_id(run_id, node, task_id, logical_attempt)
+        if (
+            recovery_rebase
+            and run_id in self.recovery_run_ids
+            and base_call_id not in self.authorized_recovery_call_ids
+        ):
+            logical_attempt += 1
         call_id = make_call_id(run_id, node, task_id, logical_attempt)
         request_sha256 = self._request_hash(
             messages, schema, max_input_tokens, max_output_tokens, logical_attempt
@@ -167,6 +180,7 @@ class StructuredLLM:
                     max_output_tokens=max_output_tokens,
                     logical_attempt=1,
                     allow_repair=allow_repair,
+                    recovery_rebase=False,
                 )
                 return StructuredResult(
                     value=repaired.value,
@@ -260,6 +274,7 @@ class StructuredLLM:
                 max_output_tokens=max_output_tokens,
                 logical_attempt=1,
                 allow_repair=allow_repair,
+                recovery_rebase=False,
             )
             return StructuredResult(
                 value=repaired.value,

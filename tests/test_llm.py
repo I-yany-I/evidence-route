@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict
 from evidence_route.artifacts import BillingStateError, SQLiteRunStore
 from evidence_route.budget import PriceConfig, UsageUnavailable
 from evidence_route.config import LLMSettings
-from evidence_route.llm import BillingUncertain, RawCompletion, StructuredLLM
+from evidence_route.llm import BillingUncertain, RawCompletion, StructuredLLM, make_call_id
 
 
 class RoutePayload(BaseModel):
@@ -152,6 +152,54 @@ async def test_equivalent_v1_base_url_reuses_legacy_call_fingerprint(tmp_path) -
 
     assert result.value.route == "single"
     assert second_transport.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_recovery_allocates_new_logical_slot_for_non_authorized_call(tmp_path) -> None:
+    transport = FakeTransport([raw('{"route":"single"}')])
+    first = make_llm(tmp_path, transport)
+    old_call_id = make_call_id("run-recovery-slot", "judge", "root", 0)
+    first.run_store.reserve_call(
+        old_call_id,
+        request_sha256="a" * 64,
+        run_id="run-recovery-slot",
+        node="judge",
+        task_id="root",
+        logical_attempt=0,
+        max_input_tokens=1800,
+        max_output_tokens=250,
+    )
+
+    recovery_transport = FakeTransport([raw('{"route":"single"}')])
+    recovery = StructuredLLM(
+        settings=first.settings,
+        transport=recovery_transport,
+        sleeper=asyncio.sleep,
+        run_store=first.run_store,
+        recovery_run_ids={"run-recovery-slot"},
+        authorized_recovery_call_ids=set(),
+    )
+
+    await recovery.invoke(
+        run_id="run-recovery-slot",
+        node="judge",
+        task_id="root",
+        messages=[{"role": "user", "content": "new judge input"}],
+        schema=RoutePayload,
+        max_input_tokens=1800,
+        max_output_tokens=250,
+    )
+
+    assert recovery_transport.calls == 1
+    connection = first.run_store._connect()
+    try:
+        attempts = connection.execute(
+            "SELECT logical_attempt FROM calls WHERE run_id = ? ORDER BY logical_attempt",
+            ("run-recovery-slot",),
+        ).fetchall()
+    finally:
+        connection.close()
+    assert [row[0] for row in attempts] == [0, 1]
 
 
 @pytest.mark.asyncio

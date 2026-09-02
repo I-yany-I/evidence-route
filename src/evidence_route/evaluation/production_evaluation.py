@@ -1103,6 +1103,7 @@ class ProductionCampaignService:
                 trace_dir=activity_dir / "traces",
                 transport=transport,
                 billing_recovery_run_ids=authorized_recovery_run_ids,
+                authorized_recovery_call_ids=authorized_recovery_call_ids,
             )
 
         runner = CampaignRunner(
