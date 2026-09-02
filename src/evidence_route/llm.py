@@ -8,7 +8,7 @@ from typing import Any, Generic, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from evidence_route.artifacts import SQLiteRunStore
+from evidence_route.artifacts import RequestFingerprintMismatch, SQLiteRunStore
 from evidence_route.budget import UsageUnavailable
 from evidence_route.config import LLMSettings
 from evidence_route.contracts import Usage
@@ -133,7 +133,18 @@ class StructuredLLM:
         request_sha256 = self._request_hash(
             messages, schema, max_input_tokens, max_output_tokens, logical_attempt
         )
-        decision = self.run_store.resume_decision(call_id, request_sha256=request_sha256)
+        try:
+            decision = self.run_store.resume_decision(call_id, request_sha256=request_sha256)
+        except RequestFingerprintMismatch:
+            legacy_request_sha256 = self._legacy_request_hash(
+                messages, schema, max_input_tokens, max_output_tokens, logical_attempt
+            )
+            if legacy_request_sha256 is None:
+                raise
+            decision = self.run_store.resume_decision(
+                call_id, request_sha256=legacy_request_sha256
+            )
+            request_sha256 = legacy_request_sha256
         if decision.action == "reuse_and_stop":
             raise UsageUnavailable("cached response has missing provider usage")
         if decision.action == "reuse":
@@ -318,9 +329,11 @@ class StructuredLLM:
         max_input_tokens: int,
         max_output_tokens: int,
         logical_attempt: int,
+        *,
+        base_url: str | None = None,
     ) -> str:
         payload = {
-            "base_url": self.settings.base_url.rstrip("/"),
+            "base_url": (base_url or self.settings.base_url).rstrip("/"),
             "requested_alias": self.settings.requested_alias,
             "messages": messages,
             "schema": schema.model_json_schema(),
@@ -331,6 +344,26 @@ class StructuredLLM:
         }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def _legacy_request_hash(
+        self,
+        messages: list[dict[str, str]],
+        schema: type[BaseModel],
+        max_input_tokens: int,
+        max_output_tokens: int,
+        logical_attempt: int,
+    ) -> str | None:
+        normalized = self.settings.base_url.rstrip("/")
+        if not normalized.endswith("/v1"):
+            return None
+        return self._request_hash(
+            messages,
+            schema,
+            max_input_tokens,
+            max_output_tokens,
+            logical_attempt,
+            base_url=normalized[:-3],
+        )
 
     @staticmethod
     def _repair_messages(

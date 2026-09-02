@@ -126,6 +126,35 @@ async def test_completed_call_is_reused_from_cache(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_equivalent_v1_base_url_reuses_legacy_call_fingerprint(tmp_path) -> None:
+    first_transport = FakeTransport([raw('{"route":"single"}')])
+    first = make_llm(tmp_path, first_transport)
+    kwargs = dict(
+        run_id="run-base-url-migration",
+        node="router",
+        task_id="root",
+        messages=[{"role": "user", "content": "route this"}],
+        schema=RoutePayload,
+        max_input_tokens=1800,
+        max_output_tokens=250,
+    )
+    await first.invoke(**kwargs)
+
+    second_transport = FakeTransport([])
+    second = StructuredLLM(
+        settings=first.settings.model_copy(update={"base_url": "https://relay.example/v1"}),
+        transport=second_transport,
+        sleeper=asyncio.sleep,
+        run_store=first.run_store,
+    )
+
+    result = await second.invoke(**kwargs)
+
+    assert result.value.route == "single"
+    assert second_transport.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_crash_after_transmit_before_cache_write_blocks_resume(tmp_path) -> None:
     first_transport = AmbiguousAfterSendTransport()
     kwargs = dict(
