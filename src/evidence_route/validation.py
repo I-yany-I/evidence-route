@@ -174,6 +174,8 @@ class ResultValidator:
         units = set(claim_unit_ids)
         allowed = set(normalized.available_evidence_ids) & set(evidence_ids)
         errors: list[str] = []
+        if normalized.status is ResultStatus.PARTIAL:
+            errors.extend(normalized.errors or ["INCOMPLETE_COVERAGE"])
         cited_units: set[str] = set()
         seen_citations: set[tuple[str, frozenset[str]]] = set()
         for citation in normalized.citations:

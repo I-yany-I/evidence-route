@@ -80,6 +80,25 @@ def test_second_invalid_result_becomes_failed() -> None:
     assert decision.result.verdict is None
 
 
+def test_partial_result_is_invalid_for_multi_recovery() -> None:
+    result = valid_result().model_copy(update={"status": ResultStatus.PARTIAL})
+
+    decision = ResultValidator(
+        low_confidence=0.65, minimum_coverage=0.0, normalize_output=True
+    ).validate(
+        result=result,
+        claim_unit_ids=["u0"],
+        evidence_ids=set(),
+        escalation_count=0,
+        strategy="adaptive",
+        draft_origin="multi",
+    )
+
+    assert decision.action is ValidationAction.FAIL
+    assert decision.result.status is ResultStatus.FAILED
+    assert "INCOMPLETE_COVERAGE" in decision.errors
+
+
 def test_normalize_verification_result_cleans_structured_fields() -> None:
     result = valid_result().model_copy(
         update={
