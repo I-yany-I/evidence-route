@@ -172,10 +172,16 @@ full-manifest macro-F1 为 0.351、完成率为 72.5%，相对 always_multi 的 
 80.762184，usage 完整且没有 billing uncertainty。完整报告位于
 `reports/evidence-route-stability-v3-20260901/`。
 
-随后开始稳定性 v4 工程修复：新增证据感知的确定性 citation projection，并为 multi 验证失败增加
+随后完成稳定性 v4 工程修复：新增证据感知的确定性 citation projection，并为 multi 验证失败增加
 一次性、可审计的 single recovery。recovery 保留初始 multi 路由、保留失败错误并把额外调用纳入
 预算上界；旧配置默认关闭，只有 `configs/stability-v4.yaml` 显式开启。v4 离线测试已覆盖引用
-去重、跨 claim unit coverage、回退成功/失败和调用上界；在付费 pilot 通过前不宣称稳定性已经达标。
+去重、跨 claim unit coverage、回退成功/失败和调用上界。付费 v4 pilot 已完成 280/280 个 work
+item，但 adaptive 严格稳定性为 11/20 (55.0%)、完成率 80.0%、full-manifest macro-F1 0.375，
+因此仍是诊断实验，不能替换 Gate A baseline。
+随后修复了 partial multi 未进入 recovery、跨 claim unit 误判重复引用和未知 claim unit 引用泄漏，
+并以独立 activity `evidence-route-stability-v4-1-pilot-20260902` 完成首批 10 个 work item：
+9 个 completed、1 个 failed、0 个 partial，3 个结果使用 recovery，24 个调用全部结账，成本为
+CNY 3.962016。该批次样本不足以证明 17/20 稳定性门槛，只用于验证状态机和账务闭环。
 启用 recovery 后 Gate A 规模的 base/repair/fault 上界为 `1664/3328/9984`，相比旧配置的
 `1544/3088/9264` 多出的调用是 recovery 预留，不是实际已发生费用。
 

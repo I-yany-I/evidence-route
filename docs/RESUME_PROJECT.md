@@ -48,10 +48,16 @@ variance 1/20；activity ledger 记录 624 次 fresh call、汇总成本 CNY 80.
 `reports/evidence-route-stability-v3-20260901/`，它是稳定性工程迭代和失败分析，不覆盖 Gate A
 主结果。
 
-v4 已完成离线工程修复但尚未产生新的付费成绩：verifier 现在对模型引用执行证据感知的确定性
-projection，按冻结检索顺序、claim unit 和规范化来源 URL 去重；multi 在 worker 失败、coverage
-不足或低置信验证失败后最多执行一次 single recovery。recovery 会保留 `initial_route=multi`、
-设置 `fallback_used=true`、保留原始错误并写入 `MULTI_SINGLE_RECOVERY`，失败不会被伪装成成功。
+v4 已完成工程修复和完整付费 pilot：verifier 现在对模型引用执行证据感知的确定性 projection，
+按冻结检索顺序、claim unit 和规范化来源 URL 去重；multi 在 worker 失败、coverage 不足或低置信
+验证失败后最多执行一次 single recovery。recovery 会保留 `initial_route=multi`、设置
+`fallback_used=true`、保留原始错误并写入 `MULTI_SINGLE_RECOVERY`，失败不会被伪装成成功。v4
+完成 280/280 个 work item，但 adaptive 严格 stability 为 11/20 (55.0%)、完成率 80.0%、
+full-manifest macro-F1 0.375，仍低于项目门槛。
+随后修复了 partial multi 未触发 recovery、跨 claim unit 误判重复引用及未知 claim unit 引用边界，
+并在独立 `evidence-route-stability-v4-1-pilot-20260902` 中完成首批 10 个 work item：9 个
+completed、1 个 failed、0 个 partial，3 个 recovery，24 个调用全部结账，成本 CNY 3.962016。
+这是状态机回归验证，不是新的稳定性成绩。
 启用 v4 后，Gate A 规模预算预览的调用上界从旧配置的 1,544/3,088/9,264 增加到
 1,664/3,328/9,984；额外 single 调用已纳入预算和账本契约。当前仍需先完成 5-10 条付费 pilot，
 再根据真实 stability、completion 和质量决定是否重跑完整 280 项，因此不能把 v4 写成已达标结果。
@@ -62,7 +68,7 @@ projection，按冻结检索顺序、claim unit 和规范化来源 URL 去重；
 
 我把难点放在可验证性而不是 prompt 堆叠上。运行侧只读 claim-only manifest，gold 和官方 evaluator 在 scorer 边界；每次模型调用写入 SQLite ledger，call ID、request fingerprint、usage、价格和响应模型 ID 都可回放。预算用整数 micro-CNY 预留，usage 或账单不完整就停止活动。最终报告要求完整 manifest 分母、失败惩罚和发布门禁，避免只挑成功样本报结果。
 
-当前公开的是 Gate A 的可审计实现和一次完整的冻结 provider 评测；provider 是 OpenAI-compatible relay，响应模型身份仍是 self-reported、identity unverified。报告同时保留 full-manifest 分数和 completed-only 官方分数，避免把 partial/failed 样本从分母中静默删除。后续 stability v2/v3 实验均没有达到严格门槛，v4 目前只有离线修复，因此简历继续使用已发布 Gate A baseline，并把稳定性迭代作为工程能力和失败分析，而不是成绩升级。
+当前公开的是 Gate A 的可审计实现和完整的冻结 provider 评测；provider 是 OpenAI-compatible relay，响应模型身份仍是 self-reported、identity unverified。报告同时保留 full-manifest 分数和 completed-only 官方分数，避免把 partial/failed 样本从分母中静默删除。后续 stability v2/v3/v4 实验均没有达到严格门槛，v4-1 目前只完成 10 个 work item，因此简历继续使用已发布 Gate A baseline，并把稳定性迭代作为工程能力和失败分析，而不是成绩升级。
 
 ## 高频追问
 
@@ -98,9 +104,11 @@ runtime manifest 只保存 claim 和 corpus/evidence identity，不包含 label�
 v3 activity 已经完成，报告和 provider-free stability diagnostics 位于
 `reports/evidence-route-stability-v3-20260901/`；它与 v2、Gate A 的 artifact 和账本目录相互隔离。
 
-v4 pilot 使用 `configs/stability-v4.yaml`，必须先执行离线预算预览，确认 recovery 调用已计入 cap，再使用
-新的 activity/campaign/experiment identity。旧 v3 activity 不能直接 resume 到 v4，因为配置和图行为
-已经改变；v4 pilot 低于 17/20 或 90% completion 时，只记录诊断并继续离线修复，不覆盖 Gate A 主结果。
+v4/v4-1 pilot 使用 `configs/stability-v4.yaml`，必须先执行离线预算预览，确认 recovery 调用已计入
+cap，再使用新的 activity/campaign/experiment identity。旧 v3 activity 不能直接 resume 到 v4，
+因为配置和图行为已经改变；pilot 低于 17/20 或 90% completion 时，只记录诊断并继续离线修复，
+不覆盖 Gate A 主结果。v4-1 的首批 activity 已暂停在 10 个 work item，后续批次必须先复核该批次的
+failure artifact，再决定是否继续付费评测。
 
 v2 activity 已经完成。下面的命令用于在同一 activity 上检查或复现可恢复批处理；`--max-items 10`
 可重复使用，每批在完整 item 落盘后暂停：
