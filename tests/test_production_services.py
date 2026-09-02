@@ -18,6 +18,7 @@ from evidence_route.evaluation.activity import (
     ActivityRecord,
     CallBounds,
     CampaignPlan,
+    CampaignState,
     CampaignStatus,
     CampaignStopReason,
     LatencyBreakdown,
@@ -42,17 +43,22 @@ from evidence_route.evaluation.production_evaluation import (
 )
 from evidence_route.evaluation.runner import CampaignProcessInterruption
 from evidence_route.execution import build_run_artifact, load_price_config
-from evidence_route.llm import RawCompletion
+from evidence_route.llm import BillingUncertain, RawCompletion
 
 
-def test_experiment_billing_recovery_activity_is_resumable() -> None:
+@pytest.mark.parametrize("experiment_mode", [False, True])
+def test_billing_recovery_activity_is_resumable(experiment_mode: bool) -> None:
     activity = SimpleNamespace(
         calibration_status=CampaignStatus.COMPLETE,
         billing_uncertain=True,
         stop_reason=CampaignStopReason.BILLING_UNCERTAIN,
     )
 
-    assert _evaluation_activity_is_closed(activity, mode="resume", experiment_mode=True)
+    assert _evaluation_activity_is_closed(
+        activity,
+        mode="resume",
+        experiment_mode=experiment_mode,
+    )
 
 
 def test_billing_recovery_includes_running_item_after_process_kill() -> None:
@@ -1780,6 +1786,27 @@ class _SentThenInterruptingCampaignExecutor:
         raise CampaignProcessInterruption("fixture interruption after send")
 
 
+class _BillingUncertainCampaignExecutor:
+    def __init__(self, **kwargs: object) -> None:
+        self.run_store = kwargs["run_store"]
+
+    async def __call__(self, work: object) -> RunArtifact:
+        call_id = hashlib.sha256(f"{work.run_id}\0fixture-uncertain".encode()).hexdigest()
+        self.run_store.reserve_call(
+            call_id,
+            request_sha256="e" * 64,
+            run_id=work.run_id,
+            node="single",
+            task_id="root",
+            logical_attempt=0,
+            max_input_tokens=1,
+            max_output_tokens=1,
+        )
+        self.run_store.mark_sent(call_id)
+        self.run_store.mark_billing_uncertain(call_id)
+        raise BillingUncertain("fixture billing uncertainty")
+
+
 class _FailingCampaignExecutor:
     def __init__(self, **kwargs: object) -> None:
         pass
@@ -1903,6 +1930,56 @@ def test_evaluate_billing_uncertainty_precedes_process_interruption(
     assert activity.status is CampaignStatus.INCOMPLETE_COST_UNCERTAIN
     assert activity.stop_reason is CampaignStopReason.BILLING_UNCERTAIN
     assert activity.billing_uncertain is True
+
+
+def test_direct_billing_recovery_allows_descendant_protocol_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _prepare_evaluation_inputs(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "evidence_route.evaluation.production_evaluation.verify_current_freeze",
+        lambda expected, **kwargs: expected,
+    )
+    service = ProductionServices(
+        transport_factory=lambda settings: object(),
+        executor_factory=_BillingUncertainCampaignExecutor,
+    )
+    first = service.evaluate(**_evaluation_kwargs(paths, mode="start_after_calibration"))
+    assert first["status"] == CampaignStatus.INCOMPLETE_COST_UNCERTAIN.value
+
+    state = CampaignState.model_validate_json(
+        (paths["activity"] / "campaign.json").read_text(encoding="utf-8")
+    )
+    stopped = next(item for item in state.items if item.status is WorkStatus.STOPPED)
+    store = SQLiteRunStore(
+        paths["run_store"],
+        activity_id="activity",
+        cap_cny=350.0,
+        pricing=load_price_config(paths["pricing"]),
+    )
+    unresolved = store.unresolved_call_states(stopped.run_id)
+    assert len(unresolved) == 1
+    call_id = next(iter(unresolved))
+    store.authorize_billing_uncertain_retry(
+        call_id,
+        reason="fixture recovery authorization",
+        evidence="explicit test authorization",
+    )
+
+    descendant_flags: list[bool] = []
+
+    def verify_descendant(expected: object, **kwargs: object) -> object:
+        descendant_flags.append(bool(kwargs.get("allow_descendant_git")))
+        return expected
+
+    monkeypatch.setattr(
+        "evidence_route.evaluation.production_evaluation.verify_current_freeze",
+        verify_descendant,
+    )
+    resumed = service.evaluate(**_evaluation_kwargs(paths, mode="resume"))
+
+    assert resumed["status"] == CampaignStatus.INCOMPLETE_COST_UNCERTAIN.value
+    assert descendant_flags == [True]
 
 
 def test_evaluate_resume_accepts_clean_process_interruption(

@@ -187,7 +187,7 @@ def _evaluation_activity_is_closed(
         CampaignStopReason.USER_PAUSED,
     }
     billing_recovery_requested = (
-        mode == "resume" and experiment_mode and activity.billing_uncertain
+        mode == "resume" and activity.billing_uncertain
     )
     return not (
         activity.calibration_status is not CampaignStatus.COMPLETE
@@ -759,7 +759,6 @@ class ProductionCampaignService:
             raise ValueError("activity ID differs from calibration activity")
         billing_recovery_requested = (
             mode == "resume"
-            and experiment_mode
             and activity.stop_reason
             in {
                 CampaignStopReason.BILLING_UNCERTAIN,
@@ -1010,7 +1009,7 @@ class ProductionCampaignService:
             current_freeze = verify_current_freeze(
                 plan.freeze,
                 **freeze_kwargs,
-                allow_descendant_git=experiment_mode,
+                allow_descendant_git=experiment_mode or billing_recovery_requested,
             )
 
         def build_executor() -> Any:
