@@ -203,6 +203,37 @@ async def test_recovery_allocates_new_logical_slot_for_non_authorized_call(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_recovery_reuses_matching_completed_call_without_authorization(tmp_path) -> None:
+    first_transport = FakeTransport([raw('{"route":"single"}')])
+    first = make_llm(tmp_path, first_transport)
+    kwargs = dict(
+        run_id="run-recovery-cache",
+        node="worker",
+        task_id="t0",
+        messages=[{"role": "user", "content": "same worker input"}],
+        schema=RoutePayload,
+        max_input_tokens=1800,
+        max_output_tokens=250,
+    )
+    await first.invoke(**kwargs)
+
+    recovery_transport = FakeTransport([])
+    recovery = StructuredLLM(
+        settings=first.settings,
+        transport=recovery_transport,
+        sleeper=asyncio.sleep,
+        run_store=first.run_store,
+        recovery_run_ids={"run-recovery-cache"},
+        authorized_recovery_call_ids=set(),
+    )
+
+    result = await recovery.invoke(**kwargs)
+
+    assert result.cache_hit is True
+    assert recovery_transport.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_crash_after_transmit_before_cache_write_blocks_resume(tmp_path) -> None:
     first_transport = AmbiguousAfterSendTransport()
     kwargs = dict(

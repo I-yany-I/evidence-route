@@ -577,6 +577,7 @@ class CampaignRunner:
         expected_identity: FreezeIdentity | None = None,
         max_items: int | None = None,
         authorized_call_ids: set[str] | None = None,
+        recovery_run_ids: set[str] | None = None,
     ) -> CampaignState:
         self._validate_max_items(max_items)
         plan = self._load_plan()
@@ -590,6 +591,7 @@ class CampaignRunner:
         persisted_reason = highest_stop_reason(
             [state.stop_reason, *(item.stop_reason for item in state.items)]
         )
+        recovery_run_ids = set(recovery_run_ids or set())
         recovery_requested = (
             persisted_reason
             in {
@@ -597,16 +599,23 @@ class CampaignRunner:
                 CampaignStopReason.USAGE_MISSING,
                 CampaignStopReason.INTERNAL_ERROR,
             }
-            and bool(authorized_call_ids)
+            and bool(authorized_call_ids or recovery_run_ids)
         )
         self._verify_persisted_artifacts(
             plan,
             state,
-            allow_authorized_billing_recovery=(authorized_call_ids if recovery_requested else None),
+            allow_authorized_billing_recovery=(
+                authorized_call_ids if recovery_requested and authorized_call_ids else None
+            ),
         )
         requeued_billing_recovery = (
             recovery_requested
-            and self._requeue_authorized_billing_recovery(plan, state, authorized_call_ids or set())
+            and self._requeue_authorized_billing_recovery(
+                plan,
+                state,
+                authorized_call_ids or set(),
+                recovery_run_ids,
+            )
         )
         if requeued_billing_recovery:
             self._validate_startup_reservation(plan, state, max_items=max_items)
@@ -728,15 +737,17 @@ class CampaignRunner:
         expected_identity: FreezeIdentity | None = None,
         max_items: int | None = None,
         authorized_call_ids: set[str],
+        recovery_run_ids: set[str] | None = None,
     ) -> CampaignState:
         """Resume only after explicit authorization for every unresolved paid call."""
 
-        if not authorized_call_ids:
-            raise ValueError("billing recovery requires at least one authorized call")
+        if not authorized_call_ids and not recovery_run_ids:
+            raise ValueError("billing recovery requires an authorized call or recovery run")
         return await self.resume(
             expected_identity=expected_identity,
             max_items=max_items,
             authorized_call_ids=authorized_call_ids,
+            recovery_run_ids=recovery_run_ids,
         )
 
     def _requeue_authorized_billing_recovery(
@@ -744,6 +755,7 @@ class CampaignRunner:
         plan: CampaignPlan,
         state: CampaignState,
         authorized_call_ids: set[str],
+        recovery_run_ids: set[str],
     ) -> bool:
         if self.run_store is None:
             return False
@@ -761,11 +773,17 @@ class CampaignRunner:
             return False
         for _index, item in recovery_items:
             unresolved = self.run_store.unresolved_call_states(item.run_id)
-            if not unresolved or any(
-                call_state is not CallState.RESERVED
-                or call_id not in authorized_call_ids
-                or self.run_store.get_billing_recovery_event(call_id) is None
-                for call_id, call_state in unresolved.items()
+            if unresolved:
+                if any(
+                    call_state is not CallState.RESERVED
+                    or call_id not in authorized_call_ids
+                    or self.run_store.get_billing_recovery_event(call_id) is None
+                    for call_id, call_state in unresolved.items()
+                ):
+                    return False
+            elif (
+                item.stop_reason is not CampaignStopReason.INTERNAL_ERROR
+                or item.run_id not in recovery_run_ids
             ):
                 return False
             item.status = WorkStatus.PENDING

@@ -136,12 +136,17 @@ class StructuredLLM:
         recovery_rebase: bool,
     ) -> StructuredResult[T]:
         base_call_id = make_call_id(run_id, node, task_id, logical_attempt)
-        if (
+        recovery_rebase_requested = (
             recovery_rebase
             and run_id in self.recovery_run_ids
             and base_call_id not in self.authorized_recovery_call_ids
-        ):
-            logical_attempt += 1
+        )
+        recovery_slot_rebased = False
+        if recovery_rebase_requested:
+            base_metadata = self.run_store.get_call_metadata(base_call_id)
+            if base_metadata is None or base_metadata["state"] != "completed":
+                logical_attempt += 1
+                recovery_slot_rebased = True
         call_id = make_call_id(run_id, node, task_id, logical_attempt)
         request_sha256 = self._request_hash(
             messages, schema, max_input_tokens, max_output_tokens, logical_attempt
@@ -153,11 +158,40 @@ class StructuredLLM:
                 messages, schema, max_input_tokens, max_output_tokens, logical_attempt
             )
             if legacy_request_sha256 is None:
+                if recovery_rebase_requested and not recovery_slot_rebased:
+                    return await self._invoke_attempt(
+                        run_id=run_id,
+                        node=node,
+                        task_id=task_id,
+                        messages=messages,
+                        schema=schema,
+                        max_input_tokens=max_input_tokens,
+                        max_output_tokens=max_output_tokens,
+                        logical_attempt=logical_attempt + 1,
+                        allow_repair=allow_repair,
+                        recovery_rebase=False,
+                    )
                 raise
-            decision = self.run_store.resume_decision(
-                call_id, request_sha256=legacy_request_sha256
-            )
-            request_sha256 = legacy_request_sha256
+            try:
+                decision = self.run_store.resume_decision(
+                    call_id, request_sha256=legacy_request_sha256
+                )
+                request_sha256 = legacy_request_sha256
+            except RequestFingerprintMismatch:
+                if recovery_rebase_requested and not recovery_slot_rebased:
+                    return await self._invoke_attempt(
+                        run_id=run_id,
+                        node=node,
+                        task_id=task_id,
+                        messages=messages,
+                        schema=schema,
+                        max_input_tokens=max_input_tokens,
+                        max_output_tokens=max_output_tokens,
+                        logical_attempt=logical_attempt + 1,
+                        allow_repair=allow_repair,
+                        recovery_rebase=False,
+                    )
+                raise
         if decision.action == "reuse_and_stop":
             raise UsageUnavailable("cached response has missing provider usage")
         if decision.action == "reuse":

@@ -878,6 +878,9 @@ class ProductionCampaignService:
                     continue
                 unresolved = run_store.unresolved_call_states(item.run_id)
                 if not unresolved:
+                    if item.stop_reason is CampaignStopReason.INTERNAL_ERROR:
+                        authorized_recovery_run_ids.add(item.run_id)
+                        continue
                     raise ValueError("billing recovery item has no unresolved ledger calls")
                 for call_id, call_state in unresolved.items():
                     if (
@@ -890,8 +893,8 @@ class ProductionCampaignService:
                         )
                     authorized_recovery_call_ids.add(call_id)
                     authorized_recovery_run_ids.add(item.run_id)
-            if not authorized_recovery_call_ids:
-                raise ValueError("billing recovery has no authorized calls")
+            if not authorized_recovery_call_ids and not authorized_recovery_run_ids:
+                raise ValueError("billing recovery has no authorized calls or recovery runs")
         baseline_artifact_paths: dict[str, Path] = {}
         parent_state: CampaignState | None = None
         if experiment_mode:
@@ -1132,6 +1135,7 @@ class ProductionCampaignService:
                         expected_identity=current_freeze,
                         max_items=max_items,
                         authorized_call_ids=authorized_recovery_call_ids,
+                        recovery_run_ids=authorized_recovery_run_ids,
                     )
                 else:
                     state = await runner.resume(

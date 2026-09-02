@@ -1390,6 +1390,62 @@ async def test_untyped_runtime_error_is_persisted_as_internal_failure(
 
 
 @pytest.mark.asyncio
+async def test_terminal_internal_error_can_resume_with_recovery_run_id(
+    tmp_path: Path, campaign_factory
+) -> None:
+    store = _run_store(tmp_path / "run-store.sqlite3", campaign_factory.plan().activity_id)
+
+    async def failing_executor(_item):
+        raise RuntimeError("bug in graph adapter")
+
+    runner = CampaignRunner(tmp_path, failing_executor, run_store=store)
+    with pytest.raises(RuntimeError, match="bug in graph adapter"):
+        await runner.run(campaign_factory.plan())
+
+    stopped = _load_state(tmp_path)
+    recovery_run_id = stopped.items[0].run_id
+
+    async def recovery_executor(item):
+        artifact = await campaign_factory.executor()(item)
+        call_id = artifact.call_ids[0]
+        request_sha256 = hashlib.sha256(call_id.encode()).hexdigest()
+        store.reserve_call(
+            call_id,
+            request_sha256=request_sha256,
+            run_id=item.run_id,
+            node="single",
+            task_id="root",
+            logical_attempt=0,
+            max_input_tokens=1,
+            max_output_tokens=1,
+        )
+        store.mark_sent(call_id)
+        store.complete_call(
+            call_id,
+            request_sha256=request_sha256,
+            payload={"content": "fixture"},
+            usage=artifact.usage,
+            usage_source="provider",
+            requested_alias=campaign_factory.plan().freeze.requested_alias,
+            response_model_id_raw="relay-a",
+            identity_verified=False,
+        )
+        return artifact
+
+    resumed = await CampaignRunner(
+        tmp_path, recovery_executor, run_store=store
+    ).resume_after_billing_recovery(
+        expected_identity=campaign_factory.freeze_identity(),
+        max_items=1,
+        authorized_call_ids=set(),
+        recovery_run_ids={recovery_run_id},
+    )
+
+    assert resumed.items[0].status is WorkStatus.COMPLETED
+    assert resumed.stop_reason is CampaignStopReason.USER_PAUSED
+
+
+@pytest.mark.asyncio
 async def test_typed_process_interruption_remains_resumable(
     tmp_path: Path, campaign_factory
 ) -> None:
