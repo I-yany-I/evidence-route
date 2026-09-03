@@ -176,7 +176,13 @@ class ReportInputFactory:
         self._write_manifests()
         self.calibrated_config = self.root / "configs" / "calibrated.yaml"
         self.calibrated_config.parent.mkdir(parents=True, exist_ok=True)
-        self.calibrated_config.write_text("routing:\n  clear_multi_clauses: 2\n", encoding="utf-8")
+        self.calibrated_config.write_text(
+            "routing:\n"
+            "  clear_multi_clauses: 2\n"
+            "hardening:\n"
+            "  deterministic_decomposition: true\n",
+            encoding="utf-8",
+        )
         claims = [{"claim_id": f"dev-{index}"} for index in range(80)]
         schedule, links = build_campaign_schedule(
             claims,
@@ -262,15 +268,15 @@ class ReportInputFactory:
             run_ids=[*calibration_run_ids, *summary.run_ids],
             call_ids=[*calibration_call_ids, *summary.call_ids],
             usage=Usage(
-                input_tokens=32 * 240 + summary.usage.input_tokens,
-                output_tokens=32 * 60 + summary.usage.output_tokens,
-                total_tokens=32 * 300 + summary.usage.total_tokens,
+                input_tokens=32 * 224 + summary.usage.input_tokens,
+                output_tokens=32 * 56 + summary.usage.output_tokens,
+                total_tokens=32 * 280 + summary.usage.total_tokens,
                 complete=True,
             ),
             usage_sources=["provider"] * (len(calibration_call_ids) + len(summary.call_ids)),
-            actual_cost_micro_cny=32 * 300 + int(summary.actual_cost_micro_cny or 0),
-            known_actual_cost_micro_cny=32 * 300 + summary.known_actual_cost_micro_cny,
-            committed_cost_micro_cny=32 * 300 + summary.committed_cost_micro_cny,
+            actual_cost_micro_cny=32 * 280 + int(summary.actual_cost_micro_cny or 0),
+            known_actual_cost_micro_cny=32 * 280 + summary.known_actual_cost_micro_cny,
+            committed_cost_micro_cny=32 * 280 + summary.committed_cost_micro_cny,
             cost_is_lower_bound=False,
             fresh_call_count=len(calibration_call_ids) + len(summary.call_ids),
             cache_hit_count=summary.cache_hit_count,
@@ -480,11 +486,22 @@ class ReportInputFactory:
                 price_config_id=_price_config_id(),
                 latency_ms=10,
             )
-            result_multi = result_single.model_copy(update={"initial_route": "multi"}, deep=True)
+            result_multi = result_single.model_copy(
+                update={
+                    "initial_route": "multi",
+                    "usage": Usage(
+                        input_tokens=64,
+                        output_tokens=16,
+                        total_tokens=80,
+                        complete=True,
+                    ),
+                    "estimated_cost_micro_cny": 80,
+                },
+                deep=True,
+            )
             call_ids = [
                 make_call_id(work.router_run_id, "router", "root", 0),
                 make_call_id(work.single_run_id, "single", "root", 0),
-                make_call_id(work.multi_run_id, "decomposer", "root", 0),
                 make_call_id(work.multi_run_id, "worker", "t0", 0),
                 make_call_id(work.multi_run_id, "worker", "t1", 0),
                 make_call_id(work.multi_run_id, "worker", "t2", 0),
@@ -585,7 +602,6 @@ class ReportInputFactory:
             slots = [
                 (case.router_run_id, "router", "root"),
                 (case.single_run_id, "single", "root"),
-                (case.multi_run_id, "decomposer", "root"),
                 (case.multi_run_id, "worker", "t0"),
                 (case.multi_run_id, "worker", "t1"),
                 (case.multi_run_id, "worker", "t2"),

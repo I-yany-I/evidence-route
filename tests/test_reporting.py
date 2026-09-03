@@ -166,20 +166,23 @@ def _reseal_calibration_call_slot(
     *,
     run_field: str,
     original_node: str,
+    original_task_id: str = "root",
     tampered_node: str,
+    tampered_task_id: str = "root",
     tampered_attempt: int,
 ) -> None:
     activity_dir = report_input.activity_dir
     case_path = sorted((activity_dir / "calibration" / "cases").glob("*.json"))[0]
     case = json.loads(case_path.read_text(encoding="utf-8"))
     run_id = case[run_field]
-    old_call_id = make_call_id(run_id, original_node, "root", 0)
-    new_call_id = make_call_id(run_id, tampered_node, "root", tampered_attempt)
+    old_call_id = make_call_id(run_id, original_node, original_task_id, 0)
+    new_call_id = make_call_id(run_id, tampered_node, tampered_task_id, tampered_attempt)
 
     connection = sqlite3.connect(report_input.run_store)
     updated = connection.execute(
-        "UPDATE calls SET call_id = ?, node = ?, logical_attempt = ? WHERE call_id = ?",
-        (new_call_id, tampered_node, tampered_attempt, old_call_id),
+        "UPDATE calls SET call_id = ?, node = ?, task_id = ?, logical_attempt = ? "
+        "WHERE call_id = ?",
+        (new_call_id, tampered_node, tampered_task_id, tampered_attempt, old_call_id),
     ).rowcount
     assert updated == 1
     connection.commit()
@@ -479,6 +482,73 @@ def test_regeneration_reads_artifacts_without_executor(
     assert (tmp_path / "generated" / "summary.json").is_file()
     assert (tmp_path / "generated" / "report.md").is_file()
     assert (tmp_path / "generated" / "resume_snippet.md").is_file()
+
+
+def test_deterministic_calibration_does_not_require_decomposer_ledger_calls(
+    complete_report_input,
+) -> None:
+    bundle = build_report_bundle(complete_report_input)
+
+    assert "run_store_accounting_invalid" not in bundle.publication_gate.reasons
+    assert bundle.publication_gate.publishable is True
+
+
+def test_non_deterministic_calibration_requires_decomposer_ledger_call(
+    report_input_factory,
+) -> None:
+    report_input = report_input_factory.report_input(allow_official_cache=True)
+    report_input.calibrated_config.write_text(
+        "routing:\n"
+        "  clear_multi_clauses: 2\n"
+        "hardening:\n"
+        "  deterministic_decomposition: false\n",
+        encoding="utf-8",
+    )
+
+    bundle = build_report_bundle(report_input, publish=False)
+
+    assert "run_store_accounting_invalid" in bundle.publication_gate.reasons
+
+
+def test_deterministic_calibration_rejects_decomposer_ledger_call(
+    report_input_factory,
+) -> None:
+    report_input = report_input_factory.report_input(allow_official_cache=True)
+    _reseal_calibration_call_slot(
+        report_input,
+        run_field="multi_run_id",
+        original_node="worker",
+        original_task_id="t0",
+        tampered_node="decomposer",
+        tampered_attempt=0,
+    )
+
+    bundle = build_report_bundle(report_input, publish=False)
+
+    assert "run_store_accounting_invalid" in bundle.publication_gate.reasons
+
+
+@pytest.mark.parametrize(
+    "config_text",
+    [
+        "false\n",
+        "null\n",
+        "[]\n",
+        "hardening: false\n",
+        'hardening:\n  deterministic_decomposition: "true"\n',
+        "hardening: [\n",
+    ],
+)
+def test_invalid_calibrated_hardening_blocks_publication(
+    report_input_factory,
+    config_text: str,
+) -> None:
+    report_input = report_input_factory.report_input(allow_official_cache=True)
+    report_input.calibrated_config.write_text(config_text, encoding="utf-8")
+
+    bundle = build_report_bundle(report_input, publish=False)
+
+    assert "calibration_evidence_invalid" in bundle.publication_gate.reasons
 
 
 def test_report_regeneration_is_byte_identical(complete_report_input, tmp_path: Path) -> None:

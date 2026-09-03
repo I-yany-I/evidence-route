@@ -1,6 +1,6 @@
 # EvidenceRoute 简历与面试说明
 
-这份说明只使用仓库中已经实现、测试或由确定性代码直接计算出的事实。当前数字来自一次完整且获授权的 Gate A campaign，范围严格限定为冻结的 AVeriTeC dev balanced subset (n=80)。
+这份说明只使用仓库中已经实现、测试或由确定性代码直接计算出的事实。简历主数字来自一次完整且获授权的 Gate A campaign；后续完整实验只用于工程诊断。范围严格限定为冻结的 AVeriTeC dev balanced subset (n=80)。
 
 ## 简历定位
 
@@ -20,7 +20,7 @@
 
 上面的 1,544 / 3,088 / 9,264 是由固定 manifest 规模、节点上限和重试规则计算出的最坏调用上界，不是实际付费调用次数。离线测试数量也不是模型质量分数。
 
-简历中的质量、成本和延迟数字必须同时附带 cohort、完成率和模型身份限制；不能把 balanced subset 结果写成完整 AVeriTeC leaderboard 成绩。当前 adaptive stability 为 13/20 (65.0%)，低于项目定义的 85% 工程阈值，因此应把稳定性写成待改进项而不是已达标指标。
+简历中的质量、成本和延迟数字必须同时附带 cohort、完成率和模型身份限制；不能把 balanced subset 结果写成完整 AVeriTeC leaderboard 成绩。Gate A adaptive stability 为 13/20 (65.0%)；最新完整质量恢复实验为 15/20 (75.0%)，两者都低于项目定义的 85% 工程阈值，因此应把稳定性写成待改进项而不是已达标指标。
 
 ## 稳定性迭代实验结论
 
@@ -62,10 +62,25 @@ completed、1 个 failed、0 个 partial，3 个 recovery，24 个调用全部�
 7.134084。v4-1 与 v4-2 的前 10 个 work item 有重叠，两批合计为 30 个执行 work item，
 其中 29 completed、1 failed。这些结果是状态机回归验证，不是新的稳定性成绩。
 启用 v4 后，Gate A 规模预算预览的调用上界从旧配置的 1,544/3,088/9,264 增加到
-1,664/3,328/9,984；额外 single 调用已纳入预算和账本契约。v4-2 的 20 项 pilot 已完成，
-但它仍低于完整 stability 评测的 20-claim 设计要求，且没有达到 17/20 stability 门槛，
-因此不应把 v4 写成已达标结果；后续是否重跑完整 280 项，应在复核这 20 项 artifact 和
-账务后再决定。
+1,664/3,328/9,984；额外 single 调用已纳入预算和账本契约。
+
+完整质量恢复实验 `evidence-route-quality-recovery-v1-20260902` 已完成 280/280 个 work item，
+calibration、dev 和 stability 三阶段均为 complete。run-store 记录 594 条 completed call 和
+605 次 transport attempt，所有 usage 与费用均完整，无 billing uncertainty；总成本为 CNY
+84.555252。adaptive 的 full-manifest macro-F1 为 0.342、准确率为 38.75%、完成率为 100%，
+相对 always_multi 降低 15.6% token 和 15.7% 实际成本；严格 stability 为 15/20 (75.0%)，
+Wilson 95% 区间为 [53.1%, 88.8%]。报告通过发布门禁，官方 shared-task 2024 与 paper 2023
+evaluator 均成功运行，但质量和成本收益仍低于 Gate A baseline，稳定性也低于 17/20 门槛，
+因此它是完整、可发布的负向实验，不替换简历主结果。
+
+对 32 条 train calibration 做的 provider-free 检索诊断显示，27 条冻结 corpus 中确有 gold 来源的
+样本里，当前 sentence-level BM25 top-k 只召回 5 条 (18.5%)。典型样本 `train-2468` 的直接反证
+位于正确来源较后的句子，当前 top-k 只返回标题型弱证据，导致 single 与 multi 都倾向输出 Not
+Enough Evidence。这说明主要瓶颈是候选证据召回，而不是 verdict 后处理或重复计费恢复。下一阶段
+应先实现 source-aware candidate generation 与 dense reranker，在 calibration 上建立不调用模型的
+gold-source recall 门禁；只有离线召回明显改善后，才值得新建独立 activity 进行下一轮付费评测。
+完整诊断口径、输入哈希与逐项结果见
+[RETRIEVAL_DIAGNOSTIC_20260903.md](RETRIEVAL_DIAGNOSTIC_20260903.md)。
 
 ## 90 秒面试讲法
 
@@ -73,7 +88,7 @@ completed、1 个 failed、0 个 partial，3 个 recovery，24 个调用全部�
 
 我把难点放在可验证性而不是 prompt 堆叠上。运行侧只读 claim-only manifest，gold 和官方 evaluator 在 scorer 边界；每次模型调用写入 SQLite ledger，call ID、request fingerprint、usage、价格和响应模型 ID 都可回放。预算用整数 micro-CNY 预留，usage 或账单不完整就停止活动。最终报告要求完整 manifest 分母、失败惩罚和发布门禁，避免只挑成功样本报结果。
 
-当前公开的是 Gate A 的可审计实现和完整的冻结 provider 评测；provider 是 OpenAI-compatible relay，响应模型身份仍是 self-reported、identity unverified。报告同时保留 full-manifest 分数和 completed-only 官方分数，避免把 partial/failed 样本从分母中静默删除。后续 stability v2/v3/v4 实验均没有达到严格门槛，v4-1/v4-2 是针对前 20 个 work item 的状态机 pilot，因此简历继续使用已发布 Gate A baseline，并把稳定性迭代作为工程能力和失败分析，而不是成绩升级。
+当前公开的是 Gate A 的可审计实现和完整的冻结 provider 评测；provider 是 OpenAI-compatible relay，响应模型身份仍是 self-reported、identity unverified。报告同时保留 full-manifest 分数和 completed-only 官方分数，避免把 partial/failed 样本从分母中静默删除。后续 v2/v3/v4 和 quality-recovery 实验均没有达到严格门槛；其中 quality-recovery 已完整跑完 280/280，并把 completion 提高到 100%、stability 提高到 75%，但 macro-F1 降至 0.342。因此简历继续使用已发布 Gate A baseline，把完整负向实验和检索召回诊断作为工程能力与复盘证据，而不是成绩升级。
 
 ## 高频追问
 
@@ -95,7 +110,7 @@ runtime manifest 只保存 claim 和 corpus/evidence identity，不包含 label�
 
 ### 这个项目当前的限制是什么？
 
-当前是平衡冻结子集，不代表完整 AVeriTeC leaderboard；模型身份没有供应商认证；Gate B 的 MCP、中文案例和 Streamlit 尚未实现。正式 Gate A activity `evidence-route-gate-a-20260830-clean1` 已完成 calibration、dev 和 stability 三个阶段，campaign 为 **280/280 item complete**，账本为 **762 completed calls / CNY 87.5052**。Gate A adaptive stability 为 **13/20 (65.0%)**，v2 为 **11/20 (55.0%)**，v3 为 **13/20 (65.0%)**；三者都低于 85% 工程阈值，报告没有把稳定性包装成达标结果。
+当前是平衡冻结子集，不代表完整 AVeriTeC leaderboard；模型身份没有供应商认证；Gate B 的 MCP、中文案例和 Streamlit 尚未实现。正式 Gate A activity `evidence-route-gate-a-20260830-clean1` 已完成 calibration、dev 和 stability 三个阶段，campaign 为 **280/280 item complete**，账本为 **762 completed calls / CNY 87.5052**。Gate A adaptive stability 为 **13/20 (65.0%)**，v2 为 **11/20 (55.0%)**，v3 为 **13/20 (65.0%)**，完整 quality-recovery 为 **15/20 (75.0%)**；全部低于 85% 工程阈值。最新诊断还显示 calibration gold-source recall 仅为 **5/27 (18.5%)**，所以后续重点是检索召回，不是继续盲目增加 provider 重试。
 
 ## 离线复现
 
@@ -112,8 +127,9 @@ v3 activity 已经完成，报告和 provider-free stability diagnostics 位于
 v4/v4-1/v4-2 pilot 使用 `configs/stability-v4.yaml`，必须先执行离线预算预览，确认 recovery 调用已计入
 cap，再使用新的 activity/campaign/experiment identity。旧 v3 activity 不能直接 resume 到 v4，
 因为配置和图行为已经改变；pilot 低于 17/20 或 90% completion 时，只记录诊断并继续离线修复，
-不覆盖 Gate A 主结果。v4-2 activity 已暂停在 20 个 work item；后续应先复核这批 failure、
-recovery 和账务 artifact，再决定是否继续付费评测。
+不覆盖 Gate A 主结果。后续完整 activity `evidence-route-quality-recovery-v1-20260902` 已完成，报告位于
+`reports/evidence-route-quality-recovery-v1-20260902/`。下一次付费评测必须使用新的 identity，且应以
+provider-free calibration 检索门禁通过为前提，不能在已有 activity 上更改检索实现后继续 resume。
 
 v2 activity 已经完成。下面的命令用于在同一 activity 上检查或复现可恢复批处理；`--max-items 10`
 可重复使用，每批在完整 item 落盘后暂停：

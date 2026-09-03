@@ -189,7 +189,19 @@ CNY 3.962016；随后在独立 `evidence-route-stability-v4-2-pilot-20260902` �
 启用 recovery 后 Gate A 规模的 base/repair/fault 上界为 `1664/3328/9984`，相比旧配置的
 `1544/3088/9264` 多出的调用是 recovery 预留，不是实际已发生费用。
 
-简历项目表述、90 秒讲法和常见追问见 [docs/RESUME_PROJECT.md](docs/RESUME_PROJECT.md)。其中明确区分了可复现工程上界与尚未生成的真实模型结果。
+完整质量恢复实验 `evidence-route-quality-recovery-v1-20260902` 随后完成 280/280 个 work item：
+calibration、dev 和 stability 三阶段均为 complete，594 条调用经历 605 次 transport attempt，
+全部结账且无 billing uncertainty，总成本为 CNY 84.555252。adaptive 在 80 条 dev 上达到
+full-manifest macro-F1 0.342、准确率 38.75%、完成率 100%，相对 always_multi 降低 15.6%
+token 和 15.7% 实际成本；严格 stability 为 15/20 (75.0%，Wilson 95% CI
+[53.1%, 88.8%])。该实验改善了完成率与稳定性，但质量和成本收益仍低于 Gate A baseline，
+因此报告通过可发布性审计但不覆盖上面的简历主结果。离线 calibration 诊断进一步发现：27 条
+corpus 中确有 gold 来源的样本里，当前 sentence-level BM25 top-k 只召回 5 条 (18.5%)；下一步
+应先实现 source-aware candidate generation 与 dense reranker，并在不调用 provider 的
+calibration 检索门禁上验证召回改善，再决定是否开启新的完整付费 campaign。诊断口径、输入哈希、
+逐项结果和典型漏召回见 [docs/RETRIEVAL_DIAGNOSTIC_20260903.md](docs/RETRIEVAL_DIAGNOSTIC_20260903.md)。
+
+简历项目表述、90 秒讲法和常见追问见 [docs/RESUME_PROJECT.md](docs/RESUME_PROJECT.md)。其中明确区分了可复现工程上界、可发布结果与未达到项目门槛的诊断实验。
 
 ## Artifact And Metric Definitions
 

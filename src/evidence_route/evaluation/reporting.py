@@ -13,9 +13,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from pydantic import Field
+import yaml
+from pydantic import Field, ValidationError
 
 from evidence_route.artifacts import SQLiteRunStore
+from evidence_route.config import HardeningSettings
 from evidence_route.contracts import ResultStatus, Strategy, StrictModel, Usage, Verdict
 from evidence_route.evaluation.activity import (
     ActivityRecord,
@@ -566,6 +568,23 @@ def _evidence_path(explicit: Path | None, default: Path) -> Path:
     return Path(explicit).resolve() if explicit is not None else default.resolve()
 
 
+def _deterministic_decomposition_enabled(config_path: Path) -> bool:
+    try:
+        payload = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError("calibrated config must be valid YAML") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("calibrated config root must be a mapping")
+    hardening = payload.get("hardening", {})
+    if not isinstance(hardening, dict):
+        raise ValueError("calibrated config hardening must be a mapping")
+    try:
+        settings = HardeningSettings.model_validate(hardening, strict=True)
+    except ValidationError as exc:
+        raise ValueError("calibrated config hardening is invalid") from exc
+    return settings.deterministic_decomposition
+
+
 def _load_call_nodes(path: Path | None) -> dict[str, str]:
     """Read the non-secret node label used to measure actual LLM-router calls."""
 
@@ -590,6 +609,7 @@ def _audit_run_store(
     calibration_cases: list[Any],
     artifacts: dict[str, RunArtifact],
     pricing_path: Path,
+    deterministic_decomposition: bool = False,
 ) -> list[str]:
     """Audit immutable call accounting without needing mutable pricing configuration."""
 
@@ -619,20 +639,17 @@ def _audit_run_store(
         calibration_allowed_slots[case.single_run_id] = frozenset(
             {("single", "root", attempt) for attempt in (0, 1)}
         )
+        multi_nodes = ("judge",) if deterministic_decomposition else ("decomposer", "judge")
         calibration_allowed_slots[case.multi_run_id] = frozenset(
             {
-                *(
-                    (node, "root", attempt)
-                    for node in ("decomposer", "judge")
-                    for attempt in (0, 1)
-                ),
+                *((node, "root", attempt) for node in multi_nodes for attempt in (0, 1)),
                 *(("worker", f"t{task}", attempt) for task in range(3) for attempt in (0, 1)),
             }
         )
         calibration_required_slots[case.router_run_id] = frozenset({("router", "root", 0)})
         calibration_required_slots[case.single_run_id] = frozenset({("single", "root", 0)})
         calibration_required_slots[case.multi_run_id] = frozenset(
-            {("decomposer", "root", 0), ("judge", "root", 0)}
+            {(node, "root", 0) for node in multi_nodes}
         )
         for run_id, usage, cost in (
             (case.router_run_id, case.router_usage, case.router_actual_cost_micro_cny),
@@ -902,6 +919,7 @@ def _audit_calibration_evidence(
             report_path.read_text(encoding="utf-8")
         )
         replay_metadata = json.loads(replay_path.read_text(encoding="utf-8"))
+        deterministic_decomposition = _deterministic_decomposition_enabled(config_path)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         if "runtime manifest" in str(exc).lower() or "sidecar" in str(exc).lower():
             return ["calibration_runtime_manifest_invalid"]
@@ -988,6 +1006,7 @@ def _audit_calibration_evidence(
             pricing_path=_evidence_path(
                 report_input.pricing, repository_root / "configs/pricing.local.yaml"
             ),
+            deterministic_decomposition=deterministic_decomposition,
         )
     )
     return reasons
