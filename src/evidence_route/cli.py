@@ -28,6 +28,7 @@ from evidence_route.evaluation.activity import CallProfile
 from evidence_route.evaluation.production_calibration import ProductionCalibrationCollector
 from evidence_route.evaluation.production_evaluation import ProductionCampaignService
 from evidence_route.evaluation.reporting import ReportInput, build_report_bundle
+from evidence_route.evaluation.retrieval_diagnostics import run_diagnostic
 from evidence_route.evaluation.runner import (
     compute_gate_a_call_profile,
     estimate_call_bounds,
@@ -75,6 +76,8 @@ class CliServices(Protocol):
     def calibrate_replay(self, **kwargs: object) -> dict[str, object]: ...
 
     def report(self, **kwargs: object) -> dict[str, object]: ...
+
+    def diagnose_retrieval(self, **kwargs: object) -> dict[str, object]: ...
 
 
 class CapabilityPayload(StrictModel):
@@ -396,6 +399,22 @@ class ProductionServices:
 
     def calibrate_replay(self, **kwargs: object) -> dict[str, object]:
         return self._calibration_collector.replay(**kwargs)
+
+    def diagnose_retrieval(self, **kwargs: object) -> dict[str, object]:
+        return asyncio.run(
+            run_diagnostic(
+                runtime_manifest=Path(kwargs["runtime_manifest"]),
+                gold_manifest=Path(kwargs["gold_manifest"]),
+                corpus_dir=Path(kwargs["corpus_dir"]),
+                config_path=(
+                    Path(kwargs["config"]) if kwargs.get("config") is not None else None
+                ),
+                progress_path=Path(kwargs["progress"]),
+                output_path=Path(kwargs["output"]),
+                timing_path=Path(kwargs["timing_output"]),
+                ablation=str(kwargs.get("ablation", "default")),
+            )
+        )
 
     def report(self, **kwargs: object) -> dict[str, object]:
         repository_root = Path(kwargs["repository_root"]).resolve()
@@ -748,6 +767,43 @@ def create_app(services: CliServices) -> typer.Typer:
                 publish=publish,
                 stability_diagnostics=stability_diagnostics,
                 readme=readme,
+            )
+        except Exception as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    @app.command("diagnose-retrieval")
+    def diagnose_retrieval(
+        runtime_manifest: Annotated[Path, typer.Option("--runtime-manifest")] = ...,
+        gold_manifest: Annotated[Path, typer.Option("--gold-manifest")] = ...,
+        corpus_dir: Annotated[Path, typer.Option("--corpus-dir")] = Path(
+            "data/processed/averitec/corpora"
+        ),
+        config: Annotated[Path | None, typer.Option("--config")] = Path(
+            "configs/retrieval-v2.yaml"
+        ),
+        progress: Annotated[Path, typer.Option("--progress")] = Path(
+            "artifacts/retrieval-v2/progress.json"
+        ),
+        output: Annotated[Path, typer.Option("--output")] = Path(
+            "reports/retrieval-v2/diagnostic.json"
+        ),
+        timing_output: Annotated[Path, typer.Option("--timing-output")] = Path(
+            "reports/retrieval-v2/timing.json"
+        ),
+        ablation: Annotated[str, typer.Option("--ablation")] = "default",
+    ) -> None:
+        try:
+            payload = services.diagnose_retrieval(
+                runtime_manifest=runtime_manifest,
+                gold_manifest=gold_manifest,
+                corpus_dir=corpus_dir,
+                config=config,
+                progress=progress,
+                output=output,
+                timing_output=timing_output,
+                ablation=ablation,
             )
         except Exception as exc:
             typer.echo(str(exc), err=True)

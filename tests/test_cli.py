@@ -19,6 +19,8 @@ class FakeServices(CliServices):
         self.replay_calls = 0
         self.report_calls = 0
         self.report_kwargs = None
+        self.diagnostic_calls = 0
+        self.last_diagnostic = {}
 
     def verify(self, **kwargs):
         self.verify_calls += 1
@@ -73,6 +75,33 @@ class FakeServices(CliServices):
         self.report_calls += 1
         self.report_kwargs = kwargs
         return {"publishable": kwargs["publish"], "output_dir": str(kwargs["output_dir"])}
+
+    def diagnose_retrieval(self, **kwargs):
+        self.diagnostic_calls += 1
+        self.last_diagnostic = kwargs
+        return {"summary": {"claim_count": 1}}
+
+
+def test_diagnose_retrieval_forwards_paths_and_ablation(tmp_path: Path) -> None:
+    services = FakeServices()
+    result = CliRunner().invoke(
+        create_app(services),
+        [
+            "diagnose-retrieval",
+            "--runtime-manifest", str(tmp_path / "runtime.json"),
+            "--gold-manifest", str(tmp_path / "gold.json"),
+            "--corpus-dir", str(tmp_path / "corpora"),
+            "--config", str(tmp_path / "retrieval.yaml"),
+            "--progress", str(tmp_path / "progress.json"),
+            "--output", str(tmp_path / "diagnostic.json"),
+            "--timing-output", str(tmp_path / "timing.json"),
+            "--ablation", "source-only",
+        ],
+    )
+    assert result.exit_code == 0
+    assert services.diagnostic_calls == 1
+    assert services.last_diagnostic["ablation"] == "source-only"
+    assert services.last_diagnostic["runtime_manifest"] == tmp_path / "runtime.json"
 
 
 def test_verify_writes_machine_readable_result(tmp_path: Path) -> None:
