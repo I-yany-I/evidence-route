@@ -100,3 +100,18 @@ def test_hardening_fields_do_not_change_historical_routing_hash() -> None:
             "minimum_coverage": 1.0,
         }
     )
+
+
+def test_evidence_source_cap_is_optional_and_configurable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("EVIDENCE_ROUTE_API_KEY", "secret-value")
+    monkeypatch.setenv("EVIDENCE_ROUTE_BASE_URL", "https://relay.example")
+    monkeypatch.setenv("EVIDENCE_ROUTE_MODEL", "relay-alias")
+    path = tmp_path / "config.yaml"
+    path.write_text("evidence:\n  max_per_source: 1\n", encoding="utf-8")
+
+    config = load_app_config(path)
+
+    assert config.evidence.max_per_source == 1

@@ -50,6 +50,7 @@ class EvidenceSettings(ConfigModel):
     worker_chars: int = Field(default=800, gt=0)
     judge_max_evidence: int = Field(default=12, gt=0)
     judge_chars: int = Field(default=600, gt=0)
+    max_per_source: int | None = Field(default=None, gt=0)
 
 
 class TokenLimit(ConfigModel):

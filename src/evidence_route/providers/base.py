@@ -7,6 +7,12 @@ from evidence_route.contracts import Evidence
 
 class EvidenceProvider(Protocol):
     async def search(
-        self, claim_id: str, query: str, *, top_k: int, max_chars: int
+        self,
+        claim_id: str,
+        query: str,
+        *,
+        top_k: int,
+        max_chars: int,
+        max_per_source: int | None = None,
     ) -> list[Evidence]:
         raise NotImplementedError

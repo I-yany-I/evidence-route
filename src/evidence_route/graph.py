@@ -154,6 +154,11 @@ def make_analyze_node(components: GraphComponents):
                 state["claim_text"],
                 top_k=components.evidence_settings.probe_top_k,
                 max_chars=components.evidence_settings.probe_chars,
+                **(
+                    {"max_per_source": components.evidence_settings.max_per_source}
+                    if components.evidence_settings.max_per_source is not None
+                    else {}
+                ),
             )
             features = analyze_claim(state["claim_text"], evidence)
             return {

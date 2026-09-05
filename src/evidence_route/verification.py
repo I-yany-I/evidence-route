@@ -263,6 +263,11 @@ class SingleVerifier:
                 claim,
                 top_k=self.evidence_settings.single_top_k,
                 max_chars=self.evidence_settings.single_chars,
+                **(
+                    {"max_per_source": self.evidence_settings.max_per_source}
+                    if self.evidence_settings.max_per_source is not None
+                    else {}
+                ),
             )
             response = await self.llm.invoke(
                 run_id=run_id,
@@ -369,6 +374,11 @@ class EvidenceWorker:
                 task.query,
                 top_k=self.evidence_settings.worker_top_k,
                 max_chars=self.evidence_settings.worker_chars,
+                **(
+                    {"max_per_source": self.evidence_settings.max_per_source}
+                    if self.evidence_settings.max_per_source is not None
+                    else {}
+                ),
             )
             response = await self.llm.invoke(
                 run_id=run_id,

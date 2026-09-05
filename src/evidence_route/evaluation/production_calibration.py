@@ -500,6 +500,11 @@ class ProductionCalibrationCollector:
                     claims_by_id[work.claim_id],
                     top_k=app_config.evidence.probe_top_k,
                     max_chars=app_config.evidence.probe_chars,
+                    **(
+                        {"max_per_source": app_config.evidence.max_per_source}
+                        if app_config.evidence.max_per_source is not None
+                        else {}
+                    ),
                 )
                 features = analyze_claim(claims_by_id[work.claim_id], probe)
                 decision = await forced_router.route(
