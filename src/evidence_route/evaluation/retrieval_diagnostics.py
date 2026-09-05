@@ -17,6 +17,7 @@ from evidence_route.evaluation.runtime_manifest import load_runtime_manifest, ma
 from evidence_route.evaluation.scorer_manifest import align_runtime_and_gold, load_gold_manifest
 from evidence_route.evaluation.stability import canonicalize_citation_url
 from evidence_route.providers.averitec import AveritecFrozenProvider
+from evidence_route.providers.averitec_v2 import load_frozen_index, source_candidates
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,40 @@ class FrozenCorpusRetriever:
             candidate_source_urls=[str(item.source_url) for item in evidence],
             final_evidence_ids=[item.evidence_id for item in evidence],
             final_source_urls=[str(item.source_url) for item in evidence],
+            elapsed_ms=elapsed_ms,
+        )
+
+
+class SourceAwareCorpusRetriever:
+    def __init__(
+        self,
+        corpus_dir: Path,
+        *,
+        source_candidate_k: int,
+        passages_per_source: int,
+        candidate_k: int,
+    ) -> None:
+        self.corpus_dir = Path(corpus_dir)
+        self.source_candidate_k = source_candidate_k
+        self.passages_per_source = passages_per_source
+        self.candidate_k = candidate_k
+
+    async def retrieve(self, claim_id: str, query: str) -> RetrievalObservation:
+        started = time.perf_counter()
+        candidates = source_candidates(
+            load_frozen_index(self.corpus_dir / f"{claim_id}.jsonl"),
+            query,
+            source_candidate_k=self.source_candidate_k,
+            passages_per_source=self.passages_per_source,
+            dense_candidate_k=self.candidate_k,
+        )
+        elapsed_ms = max(0, int(round((time.perf_counter() - started) * 1000)))
+        return RetrievalObservation(
+            claim_id=claim_id,
+            candidate_evidence_ids=[item.record.evidence_id for item in candidates],
+            candidate_source_urls=[item.record.source_url for item in candidates],
+            final_evidence_ids=[item.record.evidence_id for item in candidates],
+            final_source_urls=[item.record.source_url for item in candidates],
             elapsed_ms=elapsed_ms,
         )
 
@@ -156,6 +191,18 @@ def _gold_sources(gold_item: object) -> list[str]:
     return values
 
 
+def source_only_settings(evidence_config: dict[str, object]) -> dict[str, int]:
+    candidate_k = int(evidence_config.get("single_top_k", 8))
+    return {
+        "candidate_k": candidate_k,
+        "source_candidate_k": max(
+            candidate_k,
+            int(evidence_config.get("source_candidate_k", candidate_k)),
+        ),
+        "passages_per_source": int(evidence_config.get("passages_per_source", 1)),
+    }
+
+
 def _common_root(*paths: Path) -> Path:
     resolved = [str(path.resolve()) for path in paths]
     return Path(__import__("os").path.commonpath(resolved))
@@ -196,16 +243,25 @@ async def run_diagnostic(
 
     if retriever is None:
         evidence_config = dict(config.get("evidence") or {})
-        retriever = FrozenCorpusRetriever(
-            AveritecFrozenProvider(corpus_dir),
-            top_k=int(evidence_config.get("single_top_k", 8)),
-            max_chars=int(evidence_config.get("single_chars", 800)),
-            max_per_source=(
-                int(evidence_config["max_per_source"])
-                if evidence_config.get("max_per_source") is not None
-                else None
-            ),
-        )
+        if ablation == "source-only":
+            source_settings = source_only_settings(evidence_config)
+            retriever = SourceAwareCorpusRetriever(
+                corpus_dir,
+                source_candidate_k=source_settings["source_candidate_k"],
+                passages_per_source=source_settings["passages_per_source"],
+                candidate_k=source_settings["candidate_k"],
+            )
+        else:
+            retriever = FrozenCorpusRetriever(
+                AveritecFrozenProvider(corpus_dir),
+                top_k=int(evidence_config.get("single_top_k", 8)),
+                max_chars=int(evidence_config.get("single_chars", 800)),
+                max_per_source=(
+                    int(evidence_config["max_per_source"])
+                    if evidence_config.get("max_per_source") is not None
+                    else None
+                ),
+            )
 
     for runtime_item, gold_item in aligned:
         if runtime_item.claim_id in completed:
@@ -261,9 +317,11 @@ async def run_diagnostic(
 __all__ = [
     "DiagnosticRetriever",
     "FrozenCorpusRetriever",
+    "SourceAwareCorpusRetriever",
     "RetrievalDiagnosticItem",
     "RetrievalObservation",
     "canonicalize_source_identity",
     "evaluate_observation",
     "run_diagnostic",
+    "source_only_settings",
 ]

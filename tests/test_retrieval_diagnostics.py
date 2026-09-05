@@ -7,6 +7,7 @@ import pytest
 
 from evidence_route.evaluation.retrieval_diagnostics import (
     RetrievalObservation,
+    SourceAwareCorpusRetriever,
     canonicalize_source_identity,
     evaluate_observation,
 )
@@ -56,6 +57,56 @@ def test_source_identity_treats_wayback_url_as_original_url() -> None:
     assert canonicalize_source_identity(
         "https://web.archive.org/web/20230420110826/https://example.org/article"
     ) == "https://example.org/article"
+
+
+@pytest.mark.asyncio
+async def test_source_only_retriever_returns_diversified_candidates(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpora"
+    corpus.mkdir()
+    rows = [
+        {
+            "evidence_id": "a-1",
+            "title": "A",
+            "source_url": "https://a.test/",
+            "text": "claim common",
+        },
+        {
+            "evidence_id": "a-2",
+            "title": "A",
+            "source_url": "https://a.test/",
+            "text": "claim common two",
+        },
+        {
+            "evidence_id": "b-1",
+            "title": "B",
+            "source_url": "https://b.test/",
+            "text": "decisive phrase",
+        },
+    ]
+    import hashlib
+
+    with (corpus / "dev-0.jsonl").open("w", encoding="utf-8", newline="\n") as handle:
+        for row in rows:
+            row["snapshot_sha256"] = hashlib.sha256(row["text"].encode()).hexdigest()
+            handle.write(json.dumps(row) + "\n")
+
+    observation = await SourceAwareCorpusRetriever(
+        corpus,
+        source_candidate_k=2,
+        passages_per_source=1,
+        candidate_k=2,
+    ).retrieve("dev-0", "claim decisive")
+
+    assert set(observation.candidate_source_urls) == {"https://a.test/", "https://b.test/"}
+
+
+def test_source_only_defaults_to_one_passage_per_source() -> None:
+    from evidence_route.evaluation.retrieval_diagnostics import source_only_settings
+
+    settings = source_only_settings({"single_top_k": 8, "single_chars": 800})
+
+    assert settings["passages_per_source"] == 1
+    assert settings["source_candidate_k"] >= settings["candidate_k"]
 
 
 @pytest.mark.asyncio
