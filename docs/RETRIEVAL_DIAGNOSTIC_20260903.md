@@ -87,3 +87,33 @@ Do not tune prompts against these gold fields or expose them to the runtime grap
 diagnostic to evaluate a source-aware candidate generator and reranker offline. A new paid campaign
 must use a new frozen configuration and activity identity after the retrieval change passes a declared
 calibration recall gate.
+
+## Quality Recovery Stability Baseline (2026-09-06)
+
+This provider-free projection freezes the failure categories used by the quality recovery work. It
+uses a new experiment identity and does not modify the retrieval diagnostic or any published Gate A
+artifact.
+
+- Experiment ID: `quality-recovery-baseline-20260906`
+- Activity ID: `evidence-quality-recovery-baseline-20260906`
+- Campaign ID: `evidence-quality-recovery-provider-free-baseline-20260906`
+- Input: `tests/fixtures/evaluation/quality_recovery_baseline_input.json`
+- Input SHA-256: `15371eeb88cb822810413ac07c8bc07df92e87c771a04b5a1078c4fe2a0d6d6d`
+- Output: `tests/fixtures/evaluation/quality-recovery-baseline-20260906/diagnostic.json`
+- Output SHA-256: `ff43f5136c87f54f4da744ac5e02e0332bdd02c3391e40b8f7416bbfc2eeef8f`
+- Identity: `tests/fixtures/evaluation/quality-recovery-baseline-20260906/experiment.json`
+
+Run from the repository root in PowerShell:
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path 'src').Path
+& 'C:\Users\ASUS\miniconda3\envs\agent-collab\python.exe' -m evidence_route.evaluation.stability_diagnostics `
+  --input tests/fixtures/evaluation/quality_recovery_baseline_input.json `
+  --output tests/fixtures/evaluation/quality-recovery-baseline-20260906/diagnostic.json
+```
+
+The output contains five claims and all fifteen scheduled repeat slots. It retains one partial result,
+one failed result, and one synthesized missing repeat in that denominator. The category counts are one
+each for `evidence_or_citation_drift`, `route_drift`, `validation_or_status_drift`,
+`provider_variance`, and `incomplete_or_failed`; `verdict_drift` is zero. Records are sorted by claim
+ID and repeats by repeat number.

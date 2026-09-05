@@ -1,0 +1,12 @@
+{
+  "schema_version": "1",
+  "experiment_id": "quality-recovery-baseline-20260906",
+  "activity_id": "evidence-quality-recovery-baseline-20260906",
+  "campaign_id": "evidence-quality-recovery-provider-free-baseline-20260906",
+  "created_at": "2026-09-06T06:27:16+08:00",
+  "input_path": "tests/fixtures/evaluation/quality_recovery_baseline_input.json",
+  "input_sha256": "15371eeb88cb822810413ac07c8bc07df92e87c771a04b5a1078c4fe2a0d6d6d",
+  "output_path": "tests/fixtures/evaluation/quality-recovery-baseline-20260906/diagnostic.json",
+  "output_sha256": "ff43f5136c87f54f4da744ac5e02e0332bdd02c3391e40b8f7416bbfc2eeef8f",
+  "command": "python -m evidence_route.evaluation.stability_diagnostics --input tests/fixtures/evaluation/quality_recovery_baseline_input.json --output tests/fixtures/evaluation/quality-recovery-baseline-20260906/diagnostic.json"
+}

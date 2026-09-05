@@ -1,0 +1,63 @@
+{
+  "activity_id": "evidence-quality-recovery-baseline-20260906",
+  "campaign_id": "evidence-quality-recovery-provider-free-baseline-20260906",
+  "claim_count": 999,
+  "consistent_claim_count": 999,
+  "category_counts": {},
+  "records": [
+    {
+      "claim_id": "claim-validation",
+      "repeats": [
+        {"repeat": 2, "valid": true, "status": "completed", "verdict": "Supported"},
+        {"repeat": 0, "valid": true, "status": "completed", "verdict": "Supported"},
+        {"repeat": 1, "valid": true, "status": "partial", "verdict": "Supported"}
+      ],
+      "differing_fields": ["status"],
+      "categories": ["validation_or_status_drift"],
+      "primary_category": "validation_or_status_drift"
+    },
+    {
+      "claim_id": "claim-route",
+      "repeats": [
+        {"repeat": 1, "valid": true, "status": "completed", "verdict": "Supported", "route": "multi"},
+        {"repeat": 0, "valid": true, "status": "completed", "verdict": "Supported", "route": "single"},
+        {"repeat": 2, "valid": true, "status": "completed", "verdict": "Supported", "route": "single"}
+      ],
+      "differing_fields": ["route"],
+      "categories": ["route_drift"],
+      "primary_category": "route_drift"
+    },
+    {
+      "claim_id": "claim-provider",
+      "repeats": [
+        {"repeat": 2, "valid": true, "status": "completed", "verdict": "Supported"},
+        {"repeat": 0, "valid": true, "status": "completed", "verdict": "Supported"},
+        {"repeat": 1, "valid": true, "status": "completed", "verdict": "Refuted"}
+      ],
+      "differing_fields": ["verdict"],
+      "categories": ["provider_variance"],
+      "primary_category": "provider_variance"
+    },
+    {
+      "claim_id": "claim-incomplete",
+      "repeats": [
+        {"repeat": 1, "valid": false, "status": "failed", "error_codes": ["PROBE_RETRIEVAL_FAILED"]},
+        {"repeat": 0, "valid": true, "status": "partial", "verdict": "Not Enough Evidence"}
+      ],
+      "differing_fields": [],
+      "categories": ["incomplete_or_failed"],
+      "primary_category": "incomplete_or_failed"
+    },
+    {
+      "claim_id": "claim-evidence",
+      "repeats": [
+        {"repeat": 2, "valid": true, "status": "completed", "verdict": "Supported", "evidence_ids": ["e1"]},
+        {"repeat": 0, "valid": true, "status": "completed", "verdict": "Supported", "evidence_ids": ["e1"]},
+        {"repeat": 1, "valid": true, "status": "completed", "verdict": "Supported", "evidence_ids": ["e2"]}
+      ],
+      "differing_fields": ["evidence_ids"],
+      "categories": ["evidence_or_citation_drift"],
+      "primary_category": "evidence_or_citation_drift"
+    }
+  ]
+}
