@@ -91,6 +91,27 @@ def test_stability_v4_enables_multi_single_recovery(
     assert v4.hardening.multi_single_recovery is True
 
 
+def test_retrieval_v2_enables_source_cap_without_hardening_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EVIDENCE_ROUTE_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("EVIDENCE_ROUTE_API_KEY", "test-key")
+    monkeypatch.setenv("EVIDENCE_ROUTE_MODEL", "relay-model")
+
+    config = load_app_config(Path("configs/retrieval-v2.yaml"))
+
+    assert config.evidence.max_per_source == 1
+    assert config.hardening.model_dump(mode="json") == {
+        "deterministic_ambiguous": False,
+        "deterministic_decomposition": False,
+        "hardened_judge": False,
+        "hardened_worker": False,
+        "adjudication": False,
+        "normalize_output": False,
+        "multi_single_recovery": False,
+    }
+
+
 def test_hardening_fields_do_not_change_historical_routing_hash() -> None:
     assert stable_hash(RoutingSettings().model_dump(mode="json")) == stable_hash(
         {
