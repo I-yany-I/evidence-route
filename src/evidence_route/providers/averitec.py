@@ -98,7 +98,9 @@ class AveritecFrozenProvider:
             raise ValueError(f"claim corpus is empty: {path}")
         index = _Index(
             records=records,
-            bm25=BM25Okapi([tokenize(record.text) for record in records]),
+            bm25=BM25Okapi(
+                [tokenize(f"{record.title} {record.text}") for record in records]
+            ),
         )
         self._cache[claim_id] = index
         self._cache.move_to_end(claim_id)
