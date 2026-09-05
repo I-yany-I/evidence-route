@@ -55,13 +55,21 @@ class AveritecFrozenProvider:
         self.index_build_count = 0
 
     async def search(
-        self, claim_id: str, query: str, *, top_k: int, max_chars: int
+        self,
+        claim_id: str,
+        query: str,
+        *,
+        top_k: int,
+        max_chars: int,
+        max_per_source: int | None = None,
     ) -> list[Evidence]:
         if top_k < 1 or max_chars < 1:
             raise ValueError("top_k and max_chars must be positive")
+        if max_per_source is not None and max_per_source < 1:
+            raise ValueError("max_per_source must be positive when provided")
         index = self._get_index(claim_id)
         scores = index.bm25.get_scores(tokenize(query))
-        ranked = sorted(
+        ranked_candidates = sorted(
             zip(index.records, scores, strict=True),
             key=lambda item: (
                 -float(item[1]),
@@ -69,7 +77,18 @@ class AveritecFrozenProvider:
                 canonicalize_citation_url(item[0].source_url),
                 item[0].snapshot_sha256,
             ),
-        )[:top_k]
+        )
+        ranked: list[tuple[_Record, float]] = []
+        source_counts: dict[str, int] = {}
+        for record, score in ranked_candidates:
+            source_url = canonicalize_citation_url(record.source_url)
+            count = source_counts.get(source_url, 0)
+            if max_per_source is not None and count >= max_per_source:
+                continue
+            ranked.append((record, score))
+            source_counts[source_url] = count + 1
+            if len(ranked) == top_k:
+                break
         return [
             Evidence(
                 evidence_id=record.evidence_id,
