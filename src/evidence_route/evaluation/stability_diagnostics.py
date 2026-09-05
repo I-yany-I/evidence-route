@@ -17,6 +17,8 @@ from evidence_route.evaluation.stability import (
 )
 
 _CATEGORY_ORDER = {category: index for index, category in enumerate(StabilityCategory)}
+_EXPECTED_REPEATS = 3
+_VALID_FINAL_STATUSES = {"completed", "partial"}
 
 
 def _complete_repeats(record: StabilityClaimDiagnostic) -> list[RepeatSnapshot]:
@@ -28,16 +30,27 @@ def _complete_repeats(record: StabilityClaimDiagnostic) -> list[RepeatSnapshot]:
                 f"{record.claim_id}"
             )
         repeats[snapshot.repeat] = snapshot
-    return [repeats.get(repeat, RepeatSnapshot(repeat=repeat, valid=False)) for repeat in range(3)]
+    return [
+        repeats.get(repeat, RepeatSnapshot(repeat=repeat, valid=False))
+        for repeat in range(_EXPECTED_REPEATS)
+    ]
+
+
+def _is_valid_final_repeat(repeat: RepeatSnapshot) -> bool:
+    return (
+        repeat.valid
+        and repeat.status in _VALID_FINAL_STATUSES
+        and repeat.verdict is not None
+    )
 
 
 def _ordered_categories(
     record: StabilityClaimDiagnostic,
     repeats: list[RepeatSnapshot],
 ) -> list[StabilityCategory]:
+    if any(not _is_valid_final_repeat(repeat) for repeat in repeats):
+        return [StabilityCategory.INCOMPLETE_OR_FAILED]
     categories = set(record.categories)
-    if any(not repeat.valid or repeat.status == "failed" for repeat in repeats):
-        categories.add(StabilityCategory.INCOMPLETE_OR_FAILED)
     return sorted(categories, key=_CATEGORY_ORDER.__getitem__)
 
 
@@ -45,7 +58,7 @@ def _is_consistent(record: StabilityClaimDiagnostic) -> bool:
     verdicts = {repeat.verdict for repeat in record.repeats}
     return (
         len(record.repeats) == 3
-        and all(repeat.valid and repeat.verdict is not None for repeat in record.repeats)
+        and all(_is_valid_final_repeat(repeat) for repeat in record.repeats)
         and len(verdicts) == 1
     )
 
@@ -61,10 +74,16 @@ def project_stability_baseline(payload: Mapping[str, Any]) -> StabilityDiagnosti
         claim_ids.add(record.claim_id)
         repeats = _complete_repeats(record)
         categories = _ordered_categories(record, repeats)
+        differing_fields = (
+            []
+            if categories == [StabilityCategory.INCOMPLETE_OR_FAILED]
+            else record.differing_fields
+        )
         records.append(
             record.model_copy(
                 update={
                     "repeats": repeats,
+                    "differing_fields": differing_fields,
                     "categories": categories,
                     "primary_category": categories[0] if categories else None,
                 }
@@ -76,12 +95,19 @@ def project_stability_baseline(payload: Mapping[str, Any]) -> StabilityDiagnosti
         for category in record.categories:
             category_counts[category.value] += 1
 
+    repeat_schedule = {
+        record.claim_id: list(range(_EXPECTED_REPEATS)) for record in records
+    }
+    if summary.repeat_schedule and summary.repeat_schedule != repeat_schedule:
+        raise ValueError("stability diagnostic repeat schedule differs from repeat denominator")
+
     return summary.model_copy(
         update={
             "claim_count": len(records),
             "consistent_claim_count": sum(_is_consistent(record) for record in records),
             "category_counts": dict(sorted(category_counts.items())),
             "records": records,
+            "repeat_schedule": repeat_schedule,
         }
     )
 

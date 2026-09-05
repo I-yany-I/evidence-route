@@ -100,14 +100,14 @@ artifact.
 - Input: `tests/fixtures/evaluation/quality_recovery_baseline_input.json`
 - Input SHA-256: `15371eeb88cb822810413ac07c8bc07df92e87c771a04b5a1078c4fe2a0d6d6d`
 - Output: `tests/fixtures/evaluation/quality-recovery-baseline-20260906/diagnostic.json`
-- Output SHA-256: `ff43f5136c87f54f4da744ac5e02e0332bdd02c3391e40b8f7416bbfc2eeef8f`
+- Output SHA-256: `db163c1acb48332f11354344a5a029a6eaa54a87505baafc5f0af948e5f3660b`
 - Identity: `tests/fixtures/evaluation/quality-recovery-baseline-20260906/experiment.json`
 
 Run from the repository root in PowerShell:
 
 ```powershell
 $env:PYTHONPATH = (Resolve-Path 'src').Path
-& 'C:\Users\ASUS\miniconda3\envs\agent-collab\python.exe' -m evidence_route.evaluation.stability_diagnostics `
+python -m evidence_route.evaluation.stability_diagnostics `
   --input tests/fixtures/evaluation/quality_recovery_baseline_input.json `
   --output tests/fixtures/evaluation/quality-recovery-baseline-20260906/diagnostic.json
 ```
