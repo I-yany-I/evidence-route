@@ -167,6 +167,34 @@ def test_projection_rejects_repeat_schedule_that_disagrees_with_denominator() ->
         project_stability_baseline(payload)
 
 
+def test_complete_consistent_repeats_drop_stale_incomplete_category() -> None:
+    payload = _input_payload()
+    payload["records"] = [  # type: ignore[index]
+        {
+            "claim_id": "claim-complete",
+            "repeats": [
+                {
+                    "repeat": repeat,
+                    "valid": True,
+                    "status": "completed",
+                    "verdict": "Supported",
+                }
+                for repeat in [2, 0, 1]
+            ],
+            "differing_fields": [],
+            "categories": ["incomplete_or_failed"],
+            "primary_category": "incomplete_or_failed",
+        }
+    ]
+
+    projected = project_stability_baseline(payload)
+
+    assert projected.consistent_claim_count == 1
+    assert projected.records[0].categories == []
+    assert projected.records[0].primary_category is None
+    assert projected.category_counts["incomplete_or_failed"] == 0
+
+
 def test_frozen_diagnostic_bytes_and_experiment_hashes_are_reproducible(
     tmp_path: Path,
 ) -> None:

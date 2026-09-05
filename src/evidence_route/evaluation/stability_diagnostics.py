@@ -50,7 +50,7 @@ def _ordered_categories(
 ) -> list[StabilityCategory]:
     if any(not _is_valid_final_repeat(repeat) for repeat in repeats):
         return [StabilityCategory.INCOMPLETE_OR_FAILED]
-    categories = set(record.categories)
+    categories = set(record.categories) - {StabilityCategory.INCOMPLETE_OR_FAILED}
     return sorted(categories, key=_CATEGORY_ORDER.__getitem__)
 
 
