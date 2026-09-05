@@ -71,6 +71,31 @@ class FakeLLM:
         )()
 
 
+@pytest.mark.asyncio
+async def test_router_normalizes_reason_code_order_and_duplicates() -> None:
+    class UnstableReasonLLM:
+        async def invoke(self, **kwargs: object):
+            return type(
+                "Result",
+                (),
+                {
+                    "value": RouterPayload(
+                        route="single",
+                        reason_codes=["z_reason", "a_reason", "z_reason"],
+                        explanation="One source question",
+                    )
+                },
+            )()
+
+    decision = await HybridRouter(
+        RoutingSettings(clear_multi_clauses=999, clear_single_min_sources=999),
+        GenerationSettings(),
+        llm=UnstableReasonLLM(),
+    ).route("run", Strategy.ADAPTIVE, features(atomic_clause_count=2, probe_source_count=1))
+
+    assert decision.reason_codes == ["a_reason", "z_reason"]
+
+
 class CountingLLM(FakeLLM):
     def __init__(self) -> None:
         self.calls = 0

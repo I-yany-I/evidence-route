@@ -89,11 +89,14 @@ class HybridRouter:
         reason_codes: list[str],
         explanation: str | None = None,
     ) -> RouteDecision:
+        normalized_reason_codes = sorted({code.strip() for code in reason_codes if code.strip()})
+        if not normalized_reason_codes:
+            raise ValueError("route decision requires at least one non-empty reason code")
         return RouteDecision(
             route=route,
             source=source,
-            reason_codes=reason_codes,
-            explanation=explanation or ", ".join(reason_codes),
+            reason_codes=normalized_reason_codes,
+            explanation=explanation or ", ".join(normalized_reason_codes),
             config_hash=self.config_hash,
         )
 
