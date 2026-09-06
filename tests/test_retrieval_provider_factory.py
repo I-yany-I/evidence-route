@@ -162,6 +162,16 @@ def test_fastembed_encoder_serializes_shared_model_inference() -> None:
     assert model.max_active == 1
 
 
+def test_fastembed_encoder_skips_inference_for_empty_passages() -> None:
+    class Model:
+        def embed(self, values, *, batch_size: int):
+            raise AssertionError("empty passage set must not invoke the model")
+
+    encoder = FastEmbedEncoder(Model(), model_id="test")
+
+    assert encoder.score("query", []) == []
+
+
 def test_single_verify_uses_versioned_provider_factory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

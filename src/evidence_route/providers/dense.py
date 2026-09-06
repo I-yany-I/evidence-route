@@ -75,6 +75,8 @@ class FastEmbedEncoder:
     def score(self, query: str, passages: Sequence[str]) -> list[float]:
         if not query.strip():
             raise RetrievalModelError("query must not be empty")
+        if not passages:
+            return []
         try:
             with self._inference_lock:
                 vectors = list(self._model.embed([query, *passages], batch_size=1))
