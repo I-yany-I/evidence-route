@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import evidence_route.evaluation.retrieval_diagnostics as retrieval_diagnostics
 from evidence_route.config import EvidenceSettings
 from evidence_route.evaluation.retrieval_diagnostics import (
     HybridCorpusRetriever,
@@ -15,6 +16,228 @@ from evidence_route.evaluation.retrieval_diagnostics import (
     resolve_diagnostic_mode,
 )
 from evidence_route.providers.averitec_v2 import AveritecHybridProvider, RetrievalModelError
+
+
+def _gate_records(
+    *,
+    claim_count: int = 32,
+    source_hits: int = 22,
+    final_hits: int = 14,
+    sentinel_final_hit: bool = True,
+) -> list[dict[str, object]]:
+    claim_ids = ["train-2468", *[f"train-{index}" for index in range(claim_count - 1)]]
+    records = [
+        {
+            "claim_id": claim_id,
+            "candidate_count": 8,
+            "source_hit": index < source_hits,
+            "final_hit": index < final_hits,
+        }
+        for index, claim_id in enumerate(claim_ids)
+    ]
+    if records and not sentinel_final_hit:
+        records[0]["final_hit"] = False
+        if final_hits < len(records):
+            records[final_hits]["final_hit"] = True
+    return records
+
+
+def _gate_summary(records: list[dict[str, object]]) -> dict[str, int]:
+    return {
+        "claim_count": len(records),
+        "source_hits": sum(bool(item["source_hit"]) for item in records),
+        "final_hits": sum(bool(item["final_hit"]) for item in records),
+        "candidate_count": sum(int(item["candidate_count"]) for item in records),
+    }
+
+
+def test_retrieval_gates_pass_at_declared_boundaries() -> None:
+    records = _gate_records()
+    result = retrieval_diagnostics.evaluate_retrieval_gates(_gate_summary(records), records)
+
+    assert list(result) == [
+        "claim_count",
+        "unique_claim_count",
+        "sentinel_present",
+        "candidate_source_hits",
+        "final_top8_hits",
+        "sentinel_final_hit",
+        "failed_gates",
+        "passed",
+    ]
+    assert result == {
+        "claim_count": {"actual": 32, "required": 32, "passed": True},
+        "unique_claim_count": {"actual": 32, "required": 32, "passed": True},
+        "sentinel_present": {"actual": True, "required": True, "passed": True},
+        "candidate_source_hits": {"actual": 22, "required": 22, "passed": True},
+        "final_top8_hits": {"actual": 14, "required": 14, "passed": True},
+        "sentinel_final_hit": {"actual": True, "required": True, "passed": True},
+        "failed_gates": [],
+        "passed": True,
+    }
+
+
+@pytest.mark.parametrize("claim_count", [31, 33])
+def test_retrieval_gates_require_exactly_32_unique_claims(claim_count: int) -> None:
+    records = _gate_records(claim_count=claim_count)
+    result = retrieval_diagnostics.evaluate_retrieval_gates(_gate_summary(records), records)
+
+    assert result["claim_count"] == {
+        "actual": claim_count,
+        "required": 32,
+        "passed": False,
+    }
+    assert result["unique_claim_count"] == {
+        "actual": claim_count,
+        "required": 32,
+        "passed": False,
+    }
+    assert result["passed"] is False
+
+
+def test_retrieval_gates_reject_duplicate_claims() -> None:
+    records = _gate_records()
+    records[-1]["claim_id"] = records[-2]["claim_id"]
+
+    result = retrieval_diagnostics.evaluate_retrieval_gates(_gate_summary(records), records)
+
+    assert result["claim_count"]["passed"] is True
+    assert result["unique_claim_count"] == {
+        "actual": 31,
+        "required": 32,
+        "passed": False,
+    }
+    assert result["failed_gates"] == ["unique_claim_count"]
+
+
+def test_retrieval_gates_require_train_2468() -> None:
+    records = _gate_records()
+    records[0]["claim_id"] = "train-9999"
+
+    result = retrieval_diagnostics.evaluate_retrieval_gates(_gate_summary(records), records)
+
+    assert result["sentinel_present"] == {
+        "actual": False,
+        "required": True,
+        "passed": False,
+    }
+    assert result["failed_gates"] == ["sentinel_present", "sentinel_final_hit"]
+
+
+def test_retrieval_gates_reject_21_candidate_source_hits() -> None:
+    records = _gate_records(source_hits=21)
+    result = retrieval_diagnostics.evaluate_retrieval_gates(_gate_summary(records), records)
+
+    assert result["candidate_source_hits"] == {
+        "actual": 21,
+        "required": 22,
+        "passed": False,
+    }
+    assert result["failed_gates"] == ["candidate_source_hits"]
+
+
+def test_retrieval_gates_reject_13_final_top8_hits() -> None:
+    records = _gate_records(final_hits=13)
+    result = retrieval_diagnostics.evaluate_retrieval_gates(_gate_summary(records), records)
+
+    assert result["final_top8_hits"] == {
+        "actual": 13,
+        "required": 14,
+        "passed": False,
+    }
+    assert result["failed_gates"] == ["final_top8_hits"]
+
+
+def test_retrieval_gates_require_train_2468_final_hit() -> None:
+    records = _gate_records(sentinel_final_hit=False)
+    result = retrieval_diagnostics.evaluate_retrieval_gates(_gate_summary(records), records)
+
+    assert result["final_top8_hits"]["passed"] is True
+    assert result["sentinel_final_hit"] == {
+        "actual": False,
+        "required": True,
+        "passed": False,
+    }
+    assert result["failed_gates"] == ["sentinel_final_hit"]
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["claim_count", "source_hits", "final_hits", "candidate_count"],
+)
+def test_retrieval_gates_reject_summary_record_mismatch(field: str) -> None:
+    records = _gate_records()
+    summary = _gate_summary(records)
+    summary[field] += 1
+
+    with pytest.raises(ValueError) as exc_info:
+        retrieval_diagnostics.evaluate_retrieval_gates(summary, records)
+
+    assert str(exc_info.value) == f"retrieval diagnostic summary mismatch: {field}"
+
+
+@pytest.mark.parametrize("invalid_claim_id", [None, "", "   ", "claim-1", "train-x"])
+def test_retrieval_gates_reject_missing_blank_or_invalid_claim_id(
+    invalid_claim_id: str | None,
+) -> None:
+    records = _gate_records()
+    if invalid_claim_id is None:
+        records[-1].pop("claim_id")
+    else:
+        records[-1]["claim_id"] = invalid_claim_id
+
+    with pytest.raises(ValueError) as exc_info:
+        retrieval_diagnostics.evaluate_retrieval_gates(_gate_summary(records), records)
+
+    assert str(exc_info.value) == "retrieval diagnostic record 31 invalid claim_id"
+
+
+@pytest.mark.parametrize("claim_id", ["dev-9000", "test-9000"])
+def test_retrieval_gates_accept_supported_non_train_claim_id(claim_id: str) -> None:
+    records = _gate_records()
+    records[-1]["claim_id"] = claim_id
+
+    result = retrieval_diagnostics.evaluate_retrieval_gates(_gate_summary(records), records)
+
+    assert result["unique_claim_count"]["passed"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("source_hit", "false"),
+        ("source_hit", 0),
+        ("source_hit", 1),
+        ("final_hit", "false"),
+        ("final_hit", 0),
+        ("final_hit", 1),
+    ],
+)
+def test_retrieval_gates_require_exact_boolean_hit_fields(
+    field: str, invalid_value: object
+) -> None:
+    records = _gate_records()
+    records[-1][field] = invalid_value
+
+    with pytest.raises(ValueError) as exc_info:
+        retrieval_diagnostics.evaluate_retrieval_gates(_gate_summary(records), records)
+
+    assert str(exc_info.value) == f"retrieval diagnostic record 31 invalid {field}"
+
+
+@pytest.mark.parametrize("invalid_value", [True, "8", 8.0, -1])
+def test_retrieval_gates_require_nonnegative_exact_integer_candidate_count(
+    invalid_value: object,
+) -> None:
+    records = _gate_records()
+    records[-1]["candidate_count"] = invalid_value
+
+    with pytest.raises(ValueError) as exc_info:
+        retrieval_diagnostics.evaluate_retrieval_gates(_gate_summary(records), records)
+
+    assert str(exc_info.value) == (
+        "retrieval diagnostic record 31 invalid candidate_count"
+    )
 
 
 def test_evaluate_observation_counts_canonical_gold_source_hit() -> None:
@@ -36,6 +259,32 @@ def test_evaluate_observation_counts_canonical_gold_source_hit() -> None:
     assert result.source_hit is True
     assert result.final_hit is True
     assert result.candidate_count == 2
+
+
+@pytest.mark.parametrize(("gold_index", "expected"), [(7, True), (8, False)])
+def test_evaluate_observation_limits_final_hit_to_top_eight(
+    gold_index: int, expected: bool
+) -> None:
+    source_urls = [f"https://example.org/article-{index}" for index in range(9)]
+    evidence_ids = [f"e-{index}" for index in range(9)]
+    observation = RetrievalObservation(
+        claim_id="dev-0",
+        candidate_evidence_ids=evidence_ids,
+        candidate_source_urls=source_urls,
+        final_evidence_ids=evidence_ids,
+        final_source_urls=source_urls,
+        elapsed_ms=1,
+    )
+
+    result = evaluate_observation(
+        observation,
+        gold_source_urls=[source_urls[gold_index]],
+    )
+
+    assert result.source_hit is True
+    assert result.final_hit is expected
+    assert result.final_evidence_ids == evidence_ids
+    assert result.final_source_urls == source_urls
 
 
 def test_evaluate_observation_ignores_non_url_gold_placeholders() -> None:
@@ -575,48 +824,66 @@ async def test_diagnostic_resume_skips_completed_matching_progress(tmp_path: Pat
     gold = tmp_path / "gold.json"
     corpus = tmp_path / "corpora"
     corpus.mkdir()
-    row = {
-        "evidence_id": "e-1",
-        "title": "Example",
-        "source_url": "https://example.org/article",
-        "text": "A short fact.",
-    }
     import hashlib
 
-    row["snapshot_sha256"] = hashlib.sha256(row["text"].encode()).hexdigest()
-    corpus_file = corpus / "dev-0.jsonl"
-    corpus_file.write_text(json.dumps(row) + "\n", encoding="utf-8")
-    corpus_hash = hashlib.sha256(corpus_file.read_bytes()).hexdigest()
-    claim = "A short fact."
-    claim_hash = hashlib.sha256(claim.encode()).hexdigest()
+    claim_ids = ["train-2468", *[f"train-{index}" for index in range(31)]]
+    runtime_items: list[dict[str, object]] = []
+    gold_items: list[dict[str, object]] = []
+    for claim_id in claim_ids:
+        original_id = int(claim_id.split("-", 1)[1])
+        claim = f"A short fact for {claim_id}."
+        row = {
+            "evidence_id": f"{claim_id}-e-1",
+            "title": "Example",
+            "source_url": "https://example.org/article",
+            "text": claim,
+        }
+        row["snapshot_sha256"] = hashlib.sha256(claim.encode()).hexdigest()
+        corpus_file = corpus / f"{claim_id}.jsonl"
+        corpus_file.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        runtime_items.append(
+            {
+                "claim_id": claim_id,
+                "original_id": original_id,
+                "claim": claim,
+                "claim_sha256": hashlib.sha256(claim.encode()).hexdigest(),
+                "split": "train",
+                "corpus_relpath": f"{claim_id}.jsonl",
+                "corpus_sha256": hashlib.sha256(corpus_file.read_bytes()).hexdigest(),
+                "corpus_bytes": corpus_file.stat().st_size,
+                "corpus_records": 1,
+            }
+        )
+        gold_items.append(
+            {
+                "claim_id": claim_id,
+                "original_id": original_id,
+                "claim": claim,
+                "label": "Supported",
+                "questions": [{"answers": [{"source_url": "https://example.org/article"}]}],
+                "justification": "fact",
+            }
+        )
     runtime_payload = {
         "schema_version": "1",
         "dataset": "AVeriTeC",
         "revision": "a" * 40,
         "source_metadata_sha256": "b" * 64,
         "seed": 1,
-        "items": [{
-            "claim_id": "dev-0", "original_id": 0, "claim": claim,
-            "claim_sha256": claim_hash, "split": "dev",
-            "corpus_relpath": "dev-0.jsonl", "corpus_sha256": corpus_hash,
-            "corpus_bytes": corpus_file.stat().st_size, "corpus_records": 1,
-        }],
+        "items": runtime_items,
     }
     runtime.write_text(json.dumps(runtime_payload), encoding="utf-8")
     runtime.with_suffix(".json.sha256").write_text(
         hashlib.sha256(runtime.read_bytes()).hexdigest() + "\n", encoding="ascii"
     )
     gold_payload = {
-        "schema_version": "1", "dataset": "AVeriTeC", "revision": "a" * 40,
+        "schema_version": "1",
+        "dataset": "AVeriTeC",
+        "revision": "a" * 40,
         "source_metadata_sha256": "b" * 64,
         "runtime_manifest_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
         "seed": 1,
-        "items": [{
-            "claim_id": "dev-0", "original_id": 0, "claim": claim,
-            "label": "Supported", "questions": [{"answers": [{
-                "source_url": "https://example.org/article"
-            }]}], "justification": "fact",
-        }],
+        "items": gold_items,
     }
     gold.write_text(json.dumps(gold_payload), encoding="utf-8")
     gold.with_suffix(".json.sha256").write_text(
@@ -662,12 +929,19 @@ async def test_diagnostic_resume_skips_completed_matching_progress(tmp_path: Pat
         retriever=retriever,
     )
 
-    assert first["summary"]["final_hits"] == 1
-    assert second["summary"]["final_hits"] == 1
-    assert retriever.calls == 1
+    assert first["summary"]["final_hits"] == 32
+    assert second["summary"]["final_hits"] == 32
+    assert first["gates"] == retrieval_diagnostics.evaluate_retrieval_gates(
+        first["summary"], first["records"]
+    )
+    assert first["gates"]["passed"] is True
+    assert json.loads(output.read_text(encoding="utf-8"))["gates"] == first["gates"]
+    assert retriever.calls == 32
     assert "elapsed_ms" not in first["records"][0]
     timing_payload = json.loads(timing.read_text(encoding="utf-8"))
-    assert timing_payload["records"] == [{"claim_id": "dev-0", "elapsed_ms": 1}]
+    assert timing_payload["records"] == [
+        {"claim_id": claim_id, "elapsed_ms": 1} for claim_id in claim_ids
+    ]
 
     with pytest.raises(ValueError, match="unknown retrieval diagnostic ablation"):
         await run_diagnostic(

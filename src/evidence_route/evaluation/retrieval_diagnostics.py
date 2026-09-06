@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -25,6 +26,8 @@ from evidence_route.providers.averitec_v2 import (
 )
 from evidence_route.providers.dense import DenseEncoder
 from evidence_route.retrieval import build_evidence_provider
+
+_CLAIM_ID_RE = re.compile(r"^(?:train|dev|test)-\d+$")
 
 
 @dataclass(frozen=True)
@@ -211,7 +214,7 @@ def evaluate_observation(
         candidate_evidence_ids=list(observation.candidate_evidence_ids),
         final_evidence_ids=list(observation.final_evidence_ids),
         source_hit=bool(set(gold) & set(candidates)),
-        final_hit=bool(set(gold) & set(final)),
+        final_hit=bool(set(gold) & set(final[:8])),
         gold_source_urls=gold,
         candidate_source_urls=candidates,
         final_source_urls=final,
@@ -220,6 +223,81 @@ def evaluate_observation(
         candidate_dense_scores=list(observation.candidate_dense_scores),
         candidate_source_ranks=list(observation.candidate_source_ranks),
     )
+
+
+def evaluate_retrieval_gates(
+    summary: dict[str, object], records: list[dict[str, object]]
+) -> dict[str, object]:
+    for index, item in enumerate(records):
+        claim_id = item.get("claim_id")
+        if type(claim_id) is not str or _CLAIM_ID_RE.fullmatch(claim_id) is None:
+            raise ValueError(f"retrieval diagnostic record {index} invalid claim_id")
+        for hit_field in ("source_hit", "final_hit"):
+            if type(item.get(hit_field)) is not bool:
+                raise ValueError(
+                    f"retrieval diagnostic record {index} invalid {hit_field}"
+                )
+        candidate_count = item.get("candidate_count")
+        if type(candidate_count) is not int or candidate_count < 0:
+            raise ValueError(
+                f"retrieval diagnostic record {index} invalid candidate_count"
+            )
+
+    claim_ids = [str(item["claim_id"]) for item in records]
+    claim_count = len(records)
+    unique_claim_count = len(set(claim_ids))
+    candidate_source_hits = sum(item["source_hit"] is True for item in records)
+    final_top8_hits = sum(item["final_hit"] is True for item in records)
+    candidate_count = sum(int(item["candidate_count"]) for item in records)
+    calculated_summary = {
+        "claim_count": claim_count,
+        "source_hits": candidate_source_hits,
+        "final_hits": final_top8_hits,
+        "candidate_count": candidate_count,
+    }
+    for summary_field, actual in calculated_summary.items():
+        declared = summary.get(summary_field)
+        if type(declared) is not int or declared != actual:
+            raise ValueError(f"retrieval diagnostic summary mismatch: {summary_field}")
+
+    sentinel_present = "train-2468" in claim_ids
+    sentinel_final_hit = any(
+        item["claim_id"] == "train-2468" and item["final_hit"] is True for item in records
+    )
+    checks: dict[str, dict[str, object]] = {
+        "claim_count": {
+            "actual": claim_count,
+            "required": 32,
+            "passed": claim_count == 32,
+        },
+        "unique_claim_count": {
+            "actual": unique_claim_count,
+            "required": 32,
+            "passed": unique_claim_count == 32,
+        },
+        "sentinel_present": {
+            "actual": sentinel_present,
+            "required": True,
+            "passed": sentinel_present,
+        },
+        "candidate_source_hits": {
+            "actual": candidate_source_hits,
+            "required": 22,
+            "passed": candidate_source_hits >= 22,
+        },
+        "final_top8_hits": {
+            "actual": final_top8_hits,
+            "required": 14,
+            "passed": final_top8_hits >= 14,
+        },
+        "sentinel_final_hit": {
+            "actual": sentinel_final_hit,
+            "required": True,
+            "passed": sentinel_final_hit,
+        },
+    }
+    failed_gates = [name for name, check in checks.items() if not check["passed"]]
+    return {**checks, "failed_gates": failed_gates, "passed": not failed_gates}
 
 
 def _sha256(path: Path) -> str:
@@ -389,6 +467,7 @@ async def run_diagnostic(
         "ablation": ablation,
         "summary": summary,
         "records": records,
+        "gates": evaluate_retrieval_gates(summary, records),
     }
     atomic_write_json(output_path, result)
     atomic_write_json(
@@ -413,6 +492,7 @@ __all__ = [
     "RetrievalObservation",
     "canonicalize_source_identity",
     "evaluate_observation",
+    "evaluate_retrieval_gates",
     "resolve_diagnostic_mode",
     "run_diagnostic",
     "source_only_settings",
