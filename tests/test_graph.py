@@ -85,6 +85,23 @@ class RecoverySingle(Single):
         return result(claim_id)
 
 
+class PreRouteRecoverySingle(Single):
+    def __init__(self):
+        self.called = 0
+
+    async def verify(self, run_id, claim_id, claim, features):
+        self.called += 1
+        return VerificationResult(
+            claim_id=claim_id,
+            status=ResultStatus.FAILED,
+            rationale="retrieval failed during recovery",
+            initial_route=None,
+            failure_stage="pre_route",
+            usage=Usage(input_tokens=0, output_tokens=0, total_tokens=0, complete=True),
+            errors=["PROBE_RETRIEVAL_FAILED"],
+        )
+
+
 def forged_result(claim_id):
     citation = Citation(
         evidence_id="forged-evidence",
@@ -434,6 +451,27 @@ async def test_failed_single_recovery_remains_failed_and_is_not_retried() -> Non
     assert single.called == 1
     assert state["fallback_used"] is True
     assert state["final_result"].status is ResultStatus.FAILED
+    assert state["final_result"].fallback_used is True
+
+
+@pytest.mark.asyncio
+async def test_pre_route_failure_during_single_recovery_keeps_typed_route_metadata() -> None:
+    single = PreRouteRecoverySingle()
+    values = components("multi", Validator(["fail", "fail"]))
+    graph = build_graph(
+        replace(values, single=single, multi_single_recovery=True),
+        checkpointer=InMemorySaver(),
+    )
+
+    state = await graph.ainvoke(
+        initial_state("run-recovery-pre-route", "dev-8", "Compound claim", Strategy.ADAPTIVE),
+        config={"configurable": {"thread_id": "run-recovery-pre-route"}},
+    )
+
+    assert single.called == 1
+    assert state["final_result"].status is ResultStatus.FAILED
+    assert state["final_result"].failure_stage == "pre_route"
+    assert state["final_result"].initial_route is None
     assert state["final_result"].fallback_used is True
 
 

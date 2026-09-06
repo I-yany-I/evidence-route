@@ -217,9 +217,13 @@ def make_single_node(components: GraphComponents):
 def make_single_recovery_node(components: GraphComponents):
     async def single_recovery(state: VerificationState) -> dict[str, Any]:
         envelope = await _recovery_single_envelope(components.single, state)
+        is_pre_route_failure = (
+            envelope.result.status is ResultStatus.FAILED
+            and envelope.result.failure_stage == "pre_route"
+        )
         result = envelope.result.model_copy(
             update={
-                "initial_route": "multi",
+                "initial_route": None if is_pre_route_failure else "multi",
                 "fallback_used": True,
                 "escalated": False,
                 "errors": sorted(
