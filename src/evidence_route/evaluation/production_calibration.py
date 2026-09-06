@@ -69,7 +69,7 @@ from evidence_route.llm import (
     ensure_v1,
     make_call_id,
 )
-from evidence_route.providers.averitec import AveritecFrozenProvider
+from evidence_route.retrieval import build_evidence_provider, configured_model_receipt_path
 from evidence_route.routing import HybridRouter
 
 TransportFactory = Callable[[Any], Any]
@@ -324,6 +324,10 @@ class ProductionCalibrationCollector:
             raise ValueError("calibration runtime manifest must contain 32 unique train claims")
 
         app_config = load_app_config(_require_file(config_path, "configuration"))
+        retrieval_receipt_path = configured_model_receipt_path(app_config.evidence)
+        retrieval_receipt_sha256 = (
+            sha256_file(retrieval_receipt_path) if retrieval_receipt_path is not None else None
+        )
         pricing = self._load_pricing(pricing_path)
         receipt_path = _require_file(
             corpus_dir.parent / "preparation_receipt.json", "corpus preparation receipt"
@@ -361,6 +365,7 @@ class ProductionCalibrationCollector:
             pricing_sha256=sha256_file(pricing_path),
             endpoint_config_sha256=endpoint_sha,
             requirements_lock_sha256=sha256_file(requirements_path),
+            retrieval_model_receipt_sha256=retrieval_receipt_sha256,
             requested_alias=app_config.llm.requested_alias,
             seed=manifest.seed,
             cap_micro_cny=cap_micro_cny,
@@ -457,7 +462,7 @@ class ProductionCalibrationCollector:
             )
 
         transport = self._make_transport(app_config)
-        provider = AveritecFrozenProvider(corpus_dir)
+        provider = build_evidence_provider(corpus_dir, app_config.evidence)
         router_llm = StructuredLLM(
             settings=app_config.llm, transport=transport, run_store=run_store
         )

@@ -1,8 +1,15 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from evidence_route.config import RoutingSettings, load_app_config, redact_mapping, stable_hash
+from evidence_route.config import (
+    EvidenceSettings,
+    RoutingSettings,
+    load_app_config,
+    redact_mapping,
+    stable_hash,
+)
 
 
 def test_config_reads_secret_without_serializing_it(
@@ -101,6 +108,12 @@ def test_retrieval_v2_enables_source_cap_without_hardening_flags(
     config = load_app_config(Path("configs/retrieval-v2.yaml"))
 
     assert config.evidence.max_per_source == 1
+    assert config.evidence.retrieval_mode == "source_hybrid_v2"
+    assert config.evidence.dense_model_id == "BAAI/bge-small-en-v1.5"
+    assert (
+        config.evidence.dense_model_receipt_sha256
+        == "0a27c87394284b6505f6226c60ae242e9fdd9c29840399a2936a2b4d976ef06a"
+    )
     assert config.hardening.model_dump(mode="json") == {
         "deterministic_ambiguous": False,
         "deterministic_decomposition": False,
@@ -136,3 +149,47 @@ def test_evidence_source_cap_is_optional_and_configurable(
     config = load_app_config(path)
 
     assert config.evidence.max_per_source == 1
+
+
+def test_default_evidence_settings_preserve_sentence_bm25_v1() -> None:
+    assert EvidenceSettings().retrieval_mode == "sentence_bm25_v1"
+
+
+def test_hybrid_retrieval_requires_complete_model_identity() -> None:
+    with pytest.raises(ValidationError, match="dense model identity"):
+        EvidenceSettings(retrieval_mode="source_hybrid_v2")
+
+
+def test_hybrid_retrieval_accepts_bounded_complete_settings() -> None:
+    settings = EvidenceSettings(
+        retrieval_mode="source_hybrid_v2",
+        source_candidate_k=64,
+        passages_per_source=4,
+        dense_candidate_k=256,
+        final_per_source=1,
+        dense_model_id="BAAI/bge-small-en-v1.5",
+        dense_model_revision="52398278842ec682c6f32300af41344b1c0b0bb2",
+        dense_model_receipt_sha256="a" * 64,
+        lexical_weight=0.2,
+        source_weight=0.1,
+        dense_weight=0.7,
+    )
+
+    assert settings.source_candidate_k * settings.passages_per_source == 256
+
+
+def test_hybrid_candidate_cap_cannot_exceed_source_stage_capacity() -> None:
+    with pytest.raises(ValidationError, match="dense_candidate_k"):
+        EvidenceSettings(
+            retrieval_mode="source_hybrid_v2",
+            source_candidate_k=2,
+            passages_per_source=2,
+            dense_candidate_k=5,
+            final_per_source=1,
+            dense_model_id="BAAI/bge-small-en-v1.5",
+            dense_model_revision="52398278842ec682c6f32300af41344b1c0b0bb2",
+            dense_model_receipt_sha256="a" * 64,
+            lexical_weight=0.2,
+            source_weight=0.1,
+            dense_weight=0.7,
+        )

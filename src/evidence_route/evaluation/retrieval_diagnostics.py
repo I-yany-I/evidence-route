@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import unquote, urlsplit
@@ -13,11 +13,18 @@ from urllib.parse import unquote, urlsplit
 import yaml
 
 from evidence_route.artifacts import atomic_write_json
+from evidence_route.config import EvidenceSettings
 from evidence_route.evaluation.runtime_manifest import load_runtime_manifest, manifest_digest
 from evidence_route.evaluation.scorer_manifest import align_runtime_and_gold, load_gold_manifest
 from evidence_route.evaluation.stability import canonicalize_citation_url
 from evidence_route.providers.averitec import AveritecFrozenProvider
-from evidence_route.providers.averitec_v2 import load_frozen_index, source_candidates
+from evidence_route.providers.averitec_v2 import (
+    load_frozen_index,
+    source_candidates,
+    trace_hybrid_retrieval,
+)
+from evidence_route.providers.dense import DenseEncoder
+from evidence_route.retrieval import build_evidence_provider
 
 
 @dataclass(frozen=True)
@@ -28,6 +35,9 @@ class RetrievalObservation:
     final_evidence_ids: list[str]
     final_source_urls: list[str]
     elapsed_ms: int
+    candidate_lexical_scores: list[float] = field(default_factory=list)
+    candidate_dense_scores: list[float] = field(default_factory=list)
+    candidate_source_ranks: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -42,6 +52,9 @@ class RetrievalDiagnosticItem:
     candidate_source_urls: list[str]
     final_source_urls: list[str]
     elapsed_ms: int
+    candidate_lexical_scores: list[float] = field(default_factory=list)
+    candidate_dense_scores: list[float] = field(default_factory=list)
+    candidate_source_ranks: list[int] = field(default_factory=list)
 
 
 class DiagnosticRetriever(Protocol):
@@ -117,6 +130,41 @@ class SourceAwareCorpusRetriever:
         )
 
 
+class HybridCorpusRetriever:
+    def __init__(
+        self,
+        corpus_dir: Path,
+        *,
+        encoder: DenseEncoder,
+        settings: EvidenceSettings,
+    ) -> None:
+        self.corpus_dir = Path(corpus_dir)
+        self.encoder = encoder
+        self.settings = settings
+
+    async def retrieve(self, claim_id: str, query: str) -> RetrievalObservation:
+        started = time.perf_counter()
+        trace = trace_hybrid_retrieval(
+            load_frozen_index(self.corpus_dir / f"{claim_id}.jsonl"),
+            query,
+            settings=self.settings.model_dump(mode="python"),
+            encoder=self.encoder,
+            top_k=self.settings.single_top_k,
+        )
+        elapsed_ms = max(0, int(round((time.perf_counter() - started) * 1000)))
+        return RetrievalObservation(
+            claim_id=claim_id,
+            candidate_evidence_ids=[item.record.evidence_id for item in trace.candidates],
+            candidate_source_urls=[item.record.source_url for item in trace.candidates],
+            final_evidence_ids=[item.record.evidence_id for item, _ in trace.ranked],
+            final_source_urls=[item.record.source_url for item, _ in trace.ranked],
+            elapsed_ms=elapsed_ms,
+            candidate_lexical_scores=[item.lexical_score for item in trace.candidates],
+            candidate_dense_scores=[float(score) for score in trace.dense_scores],
+            candidate_source_ranks=[item.source_rank for item in trace.candidates],
+        )
+
+
 def canonicalize_source_identity(value: str) -> str:
     decoded = unquote(value).strip()
     parts = urlsplit(decoded)
@@ -141,12 +189,22 @@ def _canonical_sources(values: list[str]) -> list[str]:
     return sorted(canonical)
 
 
+def _canonical_source_sequence(values: list[str]) -> list[str]:
+    canonical: list[str] = []
+    for value in values:
+        try:
+            canonical.append(canonicalize_source_identity(value))
+        except ValueError:
+            canonical.append("")
+    return canonical
+
+
 def evaluate_observation(
     observation: RetrievalObservation, *, gold_source_urls: list[str]
 ) -> RetrievalDiagnosticItem:
     gold = _canonical_sources(gold_source_urls)
-    candidates = _canonical_sources(observation.candidate_source_urls)
-    final = _canonical_sources(observation.final_source_urls)
+    candidates = _canonical_source_sequence(observation.candidate_source_urls)
+    final = _canonical_source_sequence(observation.final_source_urls)
     return RetrievalDiagnosticItem(
         claim_id=observation.claim_id,
         candidate_count=len(observation.candidate_evidence_ids),
@@ -158,6 +216,9 @@ def evaluate_observation(
         candidate_source_urls=candidates,
         final_source_urls=final,
         elapsed_ms=observation.elapsed_ms,
+        candidate_lexical_scores=list(observation.candidate_lexical_scores),
+        candidate_dense_scores=list(observation.candidate_dense_scores),
+        candidate_source_ranks=list(observation.candidate_source_ranks),
     )
 
 
@@ -192,7 +253,7 @@ def _gold_sources(gold_item: object) -> list[str]:
 
 
 def source_only_settings(evidence_config: dict[str, object]) -> dict[str, int]:
-    candidate_k = int(evidence_config.get("single_top_k", 8))
+    candidate_k = max(256, int(evidence_config.get("dense_candidate_k", 256)))
     return {
         "candidate_k": candidate_k,
         "source_candidate_k": max(
@@ -201,6 +262,18 @@ def source_only_settings(evidence_config: dict[str, object]) -> dict[str, int]:
         ),
         "passages_per_source": int(evidence_config.get("passages_per_source", 1)),
     }
+
+
+def resolve_diagnostic_mode(ablation: str, settings: EvidenceSettings) -> str:
+    if ablation == "default":
+        return settings.retrieval_mode
+    if ablation == "source-only":
+        return "source_bm25_diagnostic"
+    if ablation == "hybrid":
+        if settings.retrieval_mode != "source_hybrid_v2":
+            raise ValueError("hybrid diagnostic ablation requires source_hybrid_v2 config")
+        return "source_hybrid_v2"
+    raise ValueError(f"unknown retrieval diagnostic ablation: {ablation}")
 
 
 def _common_root(*paths: Path) -> Path:
@@ -225,6 +298,9 @@ async def run_diagnostic(
     gold = load_gold_manifest(gold_manifest, allowed_root=root)
     aligned = align_runtime_and_gold(runtime, gold)
     config_hash, config = _config_identity(config_path)
+    evidence_config = dict(config.get("evidence") or {})
+    evidence_settings = EvidenceSettings.model_validate(evidence_config)
+    diagnostic_mode = resolve_diagnostic_mode(ablation, evidence_settings)
     receipt = corpus_dir.parent / "preparation_receipt.json"
     identity = {
         "runtime_manifest_sha256": manifest_digest(runtime_manifest),
@@ -232,6 +308,7 @@ async def run_diagnostic(
         "config_sha256": config_hash,
         "corpus_receipt_sha256": _sha256(receipt) if receipt.is_file() else None,
         "ablation": ablation,
+        "retrieval_mode": diagnostic_mode,
     }
     progress_path = Path(progress_path)
     completed: dict[str, dict[str, object]] = {}
@@ -242,14 +319,20 @@ async def run_diagnostic(
         completed = dict(payload.get("completed") or {})
 
     if retriever is None:
-        evidence_config = dict(config.get("evidence") or {})
-        if ablation == "source-only":
+        if diagnostic_mode == "source_bm25_diagnostic":
             source_settings = source_only_settings(evidence_config)
             retriever = SourceAwareCorpusRetriever(
                 corpus_dir,
                 source_candidate_k=source_settings["source_candidate_k"],
                 passages_per_source=source_settings["passages_per_source"],
                 candidate_k=source_settings["candidate_k"],
+            )
+        elif diagnostic_mode == "source_hybrid_v2":
+            provider = build_evidence_provider(corpus_dir, evidence_settings)
+            retriever = HybridCorpusRetriever(
+                corpus_dir,
+                encoder=provider.encoder,
+                settings=evidence_settings,
             )
         else:
             retriever = FrozenCorpusRetriever(
@@ -273,6 +356,9 @@ async def run_diagnostic(
                 final_evidence_ids=list(saved.get("final_evidence_ids", [])),
                 final_source_urls=list(saved.get("final_source_urls", [])),
                 elapsed_ms=int(saved.get("elapsed_ms", 0)),
+                candidate_lexical_scores=list(saved.get("candidate_lexical_scores", [])),
+                candidate_dense_scores=list(saved.get("candidate_dense_scores", [])),
+                candidate_source_ranks=list(saved.get("candidate_source_ranks", [])),
             )
             completed[runtime_item.claim_id] = asdict(
                 evaluate_observation(observation, gold_source_urls=_gold_sources(gold_item))
@@ -286,7 +372,11 @@ async def run_diagnostic(
             {"version": 1, "identity": identity, "completed": completed},
         )
 
-    records = [completed[item.claim_id] for item, _ in aligned]
+    timed_records = [completed[item.claim_id] for item, _ in aligned]
+    records = [
+        {key: value for key, value in item.items() if key != "elapsed_ms"}
+        for item in timed_records
+    ]
     summary = {
         "claim_count": len(records),
         "source_hits": sum(bool(item["source_hit"]) for item in records),
@@ -307,7 +397,7 @@ async def run_diagnostic(
             "identity": identity,
             "records": [
                 {"claim_id": item["claim_id"], "elapsed_ms": item["elapsed_ms"]}
-                for item in records
+                for item in timed_records
             ],
         },
     )
@@ -317,11 +407,13 @@ async def run_diagnostic(
 __all__ = [
     "DiagnosticRetriever",
     "FrozenCorpusRetriever",
+    "HybridCorpusRetriever",
     "SourceAwareCorpusRetriever",
     "RetrievalDiagnosticItem",
     "RetrievalObservation",
     "canonicalize_source_identity",
     "evaluate_observation",
+    "resolve_diagnostic_mode",
     "run_diagnostic",
     "source_only_settings",
 ]

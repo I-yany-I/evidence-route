@@ -33,7 +33,7 @@ from evidence_route.evaluation.runner import build_dev_schedule
 from evidence_route.execution import build_run_artifact
 from evidence_route.graph import GraphComponents, build_graph, initial_state
 from evidence_route.llm import OpenAITransport, StructuredLLM
-from evidence_route.providers.averitec import AveritecFrozenProvider
+from evidence_route.retrieval import build_evidence_provider
 from evidence_route.routing import HybridRouter
 from evidence_route.validation import ResultValidator, adjudicate_verification_results
 from evidence_route.verification import (
@@ -270,7 +270,7 @@ class GraphCampaignExecutor:
         self.billing_recovery_run_ids = set(billing_recovery_run_ids or set())
         self.authorized_recovery_call_ids = set(authorized_recovery_call_ids or set())
 
-        provider = AveritecFrozenProvider(corpus_dir)
+        provider = build_evidence_provider(corpus_dir, app_config.evidence)
         llm = StructuredLLM(
             settings=app_config.llm,
             transport=transport or OpenAITransport(app_config.llm),

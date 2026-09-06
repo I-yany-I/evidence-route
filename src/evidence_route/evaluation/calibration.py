@@ -74,6 +74,11 @@ class CalibrationPlan(StrictModel):
     pricing_sha256: str = Field(pattern=_SHA256_PATTERN)
     endpoint_config_sha256: str = Field(pattern=_SHA256_PATTERN)
     requirements_lock_sha256: str = Field(pattern=_SHA256_PATTERN)
+    retrieval_model_receipt_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+        exclude_if=lambda value: value is None,
+    )
     requested_alias: str = Field(min_length=1)
     seed: int
     cap_micro_cny: int = Field(gt=0)
@@ -362,6 +367,7 @@ def build_calibration_plan(
     requested_alias: str,
     seed: int,
     cap_micro_cny: int,
+    retrieval_model_receipt_sha256: str | None = None,
 ) -> CalibrationPlan:
     """Freeze the exact 32-row train cohort before any provider call."""
 
@@ -401,6 +407,8 @@ def build_calibration_plan(
         "items": [item.model_dump(mode="json") for item in items],
         "plan_fingerprint": "0" * 64,
     }
+    if retrieval_model_receipt_sha256 is not None:
+        payload["retrieval_model_receipt_sha256"] = retrieval_model_receipt_sha256
     payload["plan_fingerprint"] = plan_fingerprint(payload)
     return CalibrationPlan.model_validate(payload)
 

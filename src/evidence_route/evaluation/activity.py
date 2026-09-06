@@ -141,6 +141,11 @@ class FreezeIdentity(StrictModel):
     pricing_sha256: str = Field(pattern=_SHA256_PATTERN)
     endpoint_config_sha256: str = Field(pattern=_SHA256_PATTERN)
     requirements_lock_sha256: str = Field(pattern=_SHA256_PATTERN)
+    retrieval_model_receipt_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+        exclude_if=lambda value: value is None,
+    )
     requested_alias: str = Field(min_length=1)
     seed: int
 

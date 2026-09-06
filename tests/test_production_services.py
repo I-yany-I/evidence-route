@@ -14,6 +14,7 @@ from evidence_route.budget import BudgetExceeded
 from evidence_route.cli import ProductionServices
 from evidence_route.config import stable_hash
 from evidence_route.contracts import ResultStatus, Usage, Verdict, VerificationResult
+from evidence_route.evaluation import production_calibration as production_calibration_module
 from evidence_route.evaluation.activity import (
     ActivityRecord,
     CallBounds,
@@ -427,6 +428,51 @@ def _collect_kwargs(
         "output_report": tmp_path / "ignored-report.json",
         "resume": False,
     }
+
+
+def test_calibration_probe_uses_versioned_provider_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _write_runtime_inputs(tmp_path)
+    activity_dir = tmp_path / "activity"
+    monkeypatch.setenv("EVIDENCE_ROUTE_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("EVIDENCE_ROUTE_API_KEY", "fixture-key")
+    monkeypatch.setenv("EVIDENCE_ROUTE_MODEL", "fixture-model")
+    model_root = tmp_path / "retrieval-model"
+    model_root.mkdir()
+    model_receipt = tmp_path / "retrieval-model-receipt.json"
+    model_receipt.write_text('{"model_id":"fixture-model"}\n', encoding="utf-8")
+    model_receipt_sha256 = hashlib.sha256(model_receipt.read_bytes()).hexdigest()
+    monkeypatch.setenv("EVIDENCE_ROUTE_RETRIEVAL_MODEL_ROOT", str(model_root))
+    monkeypatch.setenv("EVIDENCE_ROUTE_RETRIEVAL_MODEL_RECEIPT", str(model_receipt))
+    with paths["config"].open("a", encoding="utf-8") as handle:
+        handle.write(
+            "evidence:\n"
+            "  retrieval_mode: source_hybrid_v2\n"
+            "  source_candidate_k: 2\n"
+            "  passages_per_source: 2\n"
+            "  dense_candidate_k: 4\n"
+            "  final_per_source: 1\n"
+            "  dense_model_id: BAAI/bge-small-en-v1.5\n"
+            "  dense_model_revision: 52398278842ec682c6f32300af41344b1c0b0bb2\n"
+            f"  dense_model_receipt_sha256: {model_receipt_sha256}\n"
+        )
+
+    def factory(corpus_dir: Path, settings: object) -> object:
+        del corpus_dir, settings
+        raise RuntimeError("calibration provider factory called")
+
+    monkeypatch.setattr(
+        production_calibration_module,
+        "build_evidence_provider",
+        factory,
+    )
+    with pytest.raises(RuntimeError, match="calibration provider factory called"):
+        ProductionServices(transport_factory=lambda settings: object()).calibrate_collect(
+            **_collect_kwargs(paths, tmp_path, activity_dir)
+        )
+    plan = json.loads((activity_dir / "calibration-plan.json").read_text(encoding="utf-8"))
+    assert plan["retrieval_model_receipt_sha256"] == model_receipt_sha256
 
 
 def _write_gold_manifest(runtime_path: Path, output_path: Path) -> Path:

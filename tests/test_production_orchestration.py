@@ -28,8 +28,57 @@ from evidence_route.evaluation.production_evaluation import estimate_campaign_ba
 from evidence_route.evaluation.runner import estimate_call_bounds
 from evidence_route.execution import load_price_config
 from evidence_route.llm import RawCompletion
+from evidence_route.providers.averitec import AveritecFrozenProvider
 
 pytest_plugins = ["tests.fixtures.evaluation.factories"]
+
+
+def test_campaign_executor_uses_versioned_provider_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EVIDENCE_ROUTE_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("EVIDENCE_ROUTE_API_KEY", "test-key")
+    monkeypatch.setenv("EVIDENCE_ROUTE_MODEL", "relay-model")
+    config = load_app_config(Path("configs/default.yaml"))
+    pricing = PriceConfig(
+        provider="fixture",
+        currency="CNY",
+        input_per_million=1,
+        output_per_million=1,
+        price_source="fixture",
+        strict_evaluation=True,
+    )
+    run_store = SQLiteRunStore(
+        tmp_path / "run-store.sqlite3",
+        activity_id="activity",
+        cap_cny=1,
+        pricing=pricing,
+    )
+    calls: list[tuple[Path, object]] = []
+    providers: list[AveritecFrozenProvider] = []
+
+    def factory(corpus_dir: Path, settings: object) -> AveritecFrozenProvider:
+        calls.append((corpus_dir, settings))
+        provider = AveritecFrozenProvider(corpus_dir)
+        providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(production_module, "build_evidence_provider", factory)
+    executor = GraphCampaignExecutor(
+        activity_id="activity",
+        campaign_id="campaign",
+        claims={"dev-0": "claim"},
+        app_config=config,
+        pricing=pricing,
+        run_store=run_store,
+        corpus_dir=Path("tests/fixtures/averitec/corpora"),
+        checkpoint_db=tmp_path / "checkpoints.sqlite3",
+        trace_dir=tmp_path / "traces",
+        transport=object(),
+    )
+
+    assert executor.provider is providers[0]
+    assert calls == [(Path("tests/fixtures/averitec/corpora"), config.evidence)]
 
 
 def _freeze() -> FreezeIdentity:

@@ -41,6 +41,9 @@ def _files(tmp_path: Path) -> dict[str, Path]:
         "dev": _write(tmp_path / "dev.json", '{"items":[2]}\n'),
         "stability": _write(tmp_path / "stability.json", '{"items":[3]}\n'),
         "receipt": _write(tmp_path / "receipt.json", '{"corpus":"frozen"}\n'),
+        "retrieval_receipt": _write(
+            tmp_path / "retrieval-receipt.json", '{"model":"frozen"}\n'
+        ),
         "prompts": _write(tmp_path / "prompts.py", "PROMPT_VERSION = 'x'\n"),
         "config": _write(tmp_path / "config.yaml", "routing:\n  low_confidence: 0.65\n"),
         "pricing": _write(tmp_path / "pricing.yaml", "currency: CNY\ninput: 1\n"),
@@ -82,6 +85,36 @@ def test_build_freeze_identity_hashes_all_inputs_without_secret(tmp_path: Path) 
         identity.calibration_runtime_manifest_sha256
         == hashlib.sha256(files["calibration"].read_bytes()).hexdigest()
     )
+
+
+def test_freeze_identity_optionally_binds_retrieval_model_receipt(tmp_path: Path) -> None:
+    files = _files(tmp_path)
+    common = {
+        "calibration_manifest": files["calibration"],
+        "dev_manifest": files["dev"],
+        "stability_manifest": files["stability"],
+        "corpus_receipt": files["receipt"],
+        "prompt_bundle": files["prompts"],
+        "config_file": files["config"],
+        "pricing_file": files["pricing"],
+        "requirements_lock": files["requirements"],
+        "endpoint_config": {"base_url": "https://relay.example/v1"},
+        "requested_alias": "relay-model",
+        "seed": 20260817,
+        "manifest_freeze_git_sha": "a" * 40,
+        "dev_protocol_git_sha": "b" * 40,
+    }
+
+    legacy = build_freeze_identity(**common)
+    bound = build_freeze_identity(
+        **common,
+        retrieval_model_receipt=files["retrieval_receipt"],
+    )
+
+    assert "retrieval_model_receipt_sha256" not in legacy.model_dump(mode="json")
+    assert bound.retrieval_model_receipt_sha256 == hashlib.sha256(
+        files["retrieval_receipt"].read_bytes()
+    ).hexdigest()
 
 
 def test_verify_current_freeze_reports_first_changed_field(tmp_path: Path) -> None:

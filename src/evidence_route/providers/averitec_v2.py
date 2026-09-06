@@ -16,7 +16,7 @@ from evidence_route.providers.averitec import (
     _Record,
     tokenize,
 )
-from evidence_route.providers.dense import DenseEncoder
+from evidence_route.providers.dense import DenseEncoder, RetrievalModelError
 
 FrozenEvidenceRecord = _Record
 FrozenClaimIndex = _Index
@@ -30,8 +30,11 @@ class RetrievalCandidate:
     source_rank: int
 
 
-class RetrievalModelError(RuntimeError):
-    """Raised when an explicitly selected dense model cannot produce scores."""
+@dataclass(frozen=True)
+class HybridRetrievalTrace:
+    candidates: list[RetrievalCandidate]
+    dense_scores: list[float]
+    ranked: list[tuple[RetrievalCandidate, float]]
 
 
 def load_frozen_index(corpus_path: Path) -> FrozenClaimIndex:
@@ -166,6 +169,50 @@ def fuse_candidates(
     )
 
 
+def trace_hybrid_retrieval(
+    index: FrozenClaimIndex,
+    query: str,
+    *,
+    settings: Mapping[str, object],
+    encoder: DenseEncoder,
+    top_k: int,
+    max_per_source: int | None = None,
+) -> HybridRetrievalTrace:
+    if not query.strip():
+        raise ValueError("query must not be empty")
+    candidates = source_candidates(
+        index,
+        query,
+        source_candidate_k=int(settings["source_candidate_k"]),
+        passages_per_source=int(settings["passages_per_source"]),
+        dense_candidate_k=int(settings["dense_candidate_k"]),
+    )
+    passages = [f"{item.record.title}\n\n{item.record.text}" for item in candidates]
+    try:
+        dense_scores = encoder.score(query, passages)
+    except Exception as exc:
+        raise RetrievalModelError(f"dense reranking failed: {exc}") from exc
+    if len(dense_scores) != len(candidates):
+        raise RetrievalModelError("dense reranking failed: score count mismatch")
+    try:
+        ranked = fuse_candidates(
+            candidates,
+            dense_scores,
+            lexical_weight=float(settings["lexical_weight"]),
+            source_weight=float(settings["source_weight"]),
+            dense_weight=float(settings["dense_weight"]),
+            top_k=top_k,
+            final_per_source=int(settings.get("final_per_source", max_per_source or top_k)),
+        )
+    except ValueError as exc:
+        raise RetrievalModelError(f"dense reranking failed: {exc}") from exc
+    return HybridRetrievalTrace(
+        candidates=candidates,
+        dense_scores=dense_scores,
+        ranked=ranked,
+    )
+
+
 class AveritecHybridProvider:
     retrieval_config_name = "evidence-route-source-hybrid-v2"
 
@@ -189,38 +236,16 @@ class AveritecHybridProvider:
         max_chars: int,
         max_per_source: int | None = None,
     ) -> list[Evidence]:
-        if not query.strip():
-            raise ValueError("query must not be empty")
         if top_k < 1 or max_chars < 1:
             raise ValueError("top_k and max_chars must be positive")
-        candidates = source_candidates(
+        trace = trace_hybrid_retrieval(
             load_frozen_index(self.corpus_dir / f"{claim_id}.jsonl"),
             query,
-            source_candidate_k=int(self.settings["source_candidate_k"]),
-            passages_per_source=int(self.settings["passages_per_source"]),
-            dense_candidate_k=int(self.settings["dense_candidate_k"]),
+            settings=self.settings,
+            encoder=self.encoder,
+            top_k=top_k,
+            max_per_source=max_per_source,
         )
-        passages = [f"{item.record.title}\n\n{item.record.text}" for item in candidates]
-        try:
-            dense_scores = self.encoder.score(query, passages)
-        except Exception as exc:
-            raise RetrievalModelError(f"dense reranking failed: {exc}") from exc
-        if len(dense_scores) != len(candidates):
-            raise RetrievalModelError("dense reranking failed: score count mismatch")
-        try:
-            ranked = fuse_candidates(
-                candidates,
-                dense_scores,
-                lexical_weight=float(self.settings["lexical_weight"]),
-                source_weight=float(self.settings["source_weight"]),
-                dense_weight=float(self.settings["dense_weight"]),
-                top_k=top_k,
-                final_per_source=int(
-                    self.settings.get("final_per_source", max_per_source or top_k)
-                ),
-            )
-        except ValueError as exc:
-            raise RetrievalModelError(f"dense reranking failed: {exc}") from exc
         return [
             Evidence(
                 evidence_id=item.record.evidence_id,
@@ -233,7 +258,7 @@ class AveritecHybridProvider:
                 char_start=0,
                 char_end=min(len(item.record.text), max_chars),
             )
-            for item, score in ranked
+            for item, score in trace.ranked
         ]
 
 
@@ -241,9 +266,11 @@ __all__ = [
     "FrozenClaimIndex",
     "FrozenEvidenceRecord",
     "AveritecHybridProvider",
+    "HybridRetrievalTrace",
     "RetrievalModelError",
     "RetrievalCandidate",
     "load_frozen_index",
     "fuse_candidates",
     "source_candidates",
+    "trace_hybrid_retrieval",
 ]

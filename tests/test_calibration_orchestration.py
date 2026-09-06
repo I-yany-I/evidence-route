@@ -86,6 +86,30 @@ def test_build_plan_and_state_freeze_deterministic_case_order() -> None:
     assert build_calibration_state(_plan()) == state
 
 
+def test_calibration_plan_optionally_binds_retrieval_model_receipt() -> None:
+    claims = [SimpleNamespace(claim_id=f"train-{index}", split="train") for index in range(32)]
+    plan = build_calibration_plan(
+        claims,
+        activity_id="gate-a",
+        manifest_freeze_git_sha="1" * 40,
+        runtime_manifest_sha256=SHA,
+        corpus_preparation_receipt_sha256="b" * 64,
+        prompt_bundle_sha256="c" * 64,
+        config_sha256="d" * 64,
+        pricing_sha256="e" * 64,
+        endpoint_config_sha256="f" * 64,
+        requirements_lock_sha256="0" * 64,
+        retrieval_model_receipt_sha256="9" * 64,
+        requested_alias="relay-model",
+        seed=20260817,
+        cap_micro_cny=350_000_000,
+    )
+
+    assert plan.retrieval_model_receipt_sha256 == "9" * 64
+    assert "retrieval_model_receipt_sha256" not in _plan().model_dump(mode="json")
+    verify_plan_fingerprint(plan)
+
+
 def test_plan_rejects_rehashed_nondeterministic_case_id() -> None:
     payload = _plan().model_dump(mode="json")
     payload["items"][0]["case_id"] = "9" * 64

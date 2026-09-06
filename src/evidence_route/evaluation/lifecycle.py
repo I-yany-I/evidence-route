@@ -163,11 +163,13 @@ def build_freeze_identity(
     config_file: Path | str | None = None,
     pricing_file: Path | str | None = None,
     requirements_lock: Path | str | None = None,
+    retrieval_model_receipt: Path | str | None = None,
     corpus_preparation_receipt_sha256: str | None = None,
     prompt_bundle_sha256: str | None = None,
     config_sha256: str | None = None,
     pricing_sha256: str | None = None,
     requirements_lock_sha256: str | None = None,
+    retrieval_model_receipt_sha256: str | None = None,
     endpoint_config: Mapping[str, object] | None = None,
     base_url: str | None = None,
     requested_alias: str,
@@ -212,6 +214,16 @@ def build_freeze_identity(
         endpoint_config_sha256=endpoint_config_hash(endpoint_config, base_url=base_url),
         requirements_lock_sha256=_digest_input(
             requirements_lock, requirements_lock_sha256, label="requirements_lock_sha256"
+        ),
+        retrieval_model_receipt_sha256=(
+            _digest_input(
+                retrieval_model_receipt,
+                retrieval_model_receipt_sha256,
+                label="retrieval_model_receipt_sha256",
+            )
+            if retrieval_model_receipt is not None
+            or retrieval_model_receipt_sha256 is not None
+            else None
         ),
         requested_alias=requested_alias,
         seed=seed,

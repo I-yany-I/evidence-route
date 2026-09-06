@@ -67,6 +67,7 @@ from evidence_route.evaluation.runner import (
 )
 from evidence_route.evaluation.runtime_manifest import load_runtime_manifest
 from evidence_route.llm import OpenAITransport, ensure_v1, make_call_id
+from evidence_route.retrieval import configured_model_receipt_path
 
 TransportFactory = Callable[[Any], Any]
 ExecutorFactory = Callable[..., Any]
@@ -257,6 +258,7 @@ class ProductionCampaignService:
             config_file=config_path,
             pricing_file=pricing_path,
             requirements_lock=requirements,
+            retrieval_model_receipt=configured_model_receipt_path(app_config.evidence),
             endpoint_config={"base_url": ensure_v1(app_config.llm.base_url)},
             requested_alias=app_config.llm.requested_alias,
             seed=calibration_plan.seed,

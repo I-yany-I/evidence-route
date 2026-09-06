@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 
 class ConfigModel(BaseModel):
@@ -51,6 +52,39 @@ class EvidenceSettings(ConfigModel):
     judge_max_evidence: int = Field(default=12, gt=0)
     judge_chars: int = Field(default=600, gt=0)
     max_per_source: int | None = Field(default=None, gt=0)
+    retrieval_mode: Literal["sentence_bm25_v1", "source_hybrid_v2"] = "sentence_bm25_v1"
+    source_candidate_k: int = Field(default=64, gt=0)
+    passages_per_source: int = Field(default=4, gt=0)
+    dense_candidate_k: int = Field(default=256, gt=0)
+    final_per_source: int = Field(default=1, gt=0)
+    dense_model_id: str | None = None
+    dense_model_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    dense_model_receipt_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    lexical_weight: float = Field(default=0.2, ge=0, le=1)
+    source_weight: float = Field(default=0.1, ge=0, le=1)
+    dense_weight: float = Field(default=0.7, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_retrieval(self) -> EvidenceSettings:
+        if self.dense_candidate_k > self.source_candidate_k * self.passages_per_source:
+            raise ValueError("dense_candidate_k cannot exceed source-stage capacity")
+        if self.final_per_source > self.passages_per_source:
+            raise ValueError("final_per_source cannot exceed passages_per_source")
+        if not math.isclose(
+            self.lexical_weight + self.source_weight + self.dense_weight,
+            1.0,
+        ):
+            raise ValueError("retrieval weights must sum to one")
+        identity = (
+            self.dense_model_id,
+            self.dense_model_revision,
+            self.dense_model_receipt_sha256,
+        )
+        if self.retrieval_mode == "source_hybrid_v2" and not all(identity):
+            raise ValueError("hybrid retrieval requires a complete dense model identity")
+        if self.retrieval_mode == "sentence_bm25_v1" and any(identity):
+            raise ValueError("v1 retrieval cannot declare a dense model identity")
+        return self
 
 
 class TokenLimit(ConfigModel):
