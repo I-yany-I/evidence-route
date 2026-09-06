@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from threading import RLock
 from typing import Protocol
 
 import numpy as np
@@ -50,11 +51,10 @@ def verify_model_receipt(model_root: Path, receipt_path: Path) -> dict[str, obje
 
 
 class FastEmbedEncoder:
-    _MAX_PASSAGES_PER_BATCH = 8
-
     def __init__(self, model: object, *, model_id: str) -> None:
         self._model = model
         self.model_id = model_id
+        self._inference_lock = RLock()
 
     @classmethod
     def from_local(cls, model_root: Path, receipt_path: Path) -> FastEmbedEncoder:
@@ -76,16 +76,13 @@ class FastEmbedEncoder:
         if not query.strip():
             raise RetrievalModelError("query must not be empty")
         try:
-            scores: list[float] = []
-            for start in range(0, len(passages), self._MAX_PASSAGES_PER_BATCH):
-                batch = passages[start : start + self._MAX_PASSAGES_PER_BATCH]
-                vectors = list(self._model.embed([query, *batch]))
-                query_vector = np.asarray(vectors[0], dtype=np.float32)
-                scores.extend(
-                    float(np.dot(query_vector, np.asarray(vector, dtype=np.float32)))
-                    for vector in vectors[1:]
-                )
-            return scores
+            with self._inference_lock:
+                vectors = list(self._model.embed([query, *passages], batch_size=1))
+            query_vector = np.asarray(vectors[0], dtype=np.float32)
+            return [
+                float(np.dot(query_vector, np.asarray(vector, dtype=np.float32)))
+                for vector in vectors[1:]
+            ]
         except Exception as exc:
             raise RetrievalModelError(f"dense reranking failed: {exc}") from exc
 

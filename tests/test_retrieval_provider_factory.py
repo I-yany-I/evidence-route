@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Lock
 from types import SimpleNamespace
 
 import pytest
@@ -117,10 +120,10 @@ def test_provider_factory_builds_v2_only_for_matching_identity(tmp_path: Path) -
 def test_fastembed_encoder_scores_passages_in_bounded_batches() -> None:
     class Model:
         def __init__(self) -> None:
-            self.batch_sizes: list[int] = []
+            self.calls: list[tuple[int, int]] = []
 
-        def embed(self, values):
-            self.batch_sizes.append(len(values))
+        def embed(self, values, *, batch_size: int):
+            self.calls.append((len(values), batch_size))
             return [[float(index)] for index, _ in enumerate(values)]
 
     model = Model()
@@ -129,7 +132,34 @@ def test_fastembed_encoder_scores_passages_in_bounded_batches() -> None:
     scores = encoder.score("query", [f"passage-{index}" for index in range(65)])
 
     assert len(scores) == 65
-    assert model.batch_sizes == [9, 9, 9, 9, 9, 9, 9, 9, 2]
+    assert model.calls == [(66, 1)]
+
+
+def test_fastembed_encoder_serializes_shared_model_inference() -> None:
+    class Model:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+            self.guard = Lock()
+
+        def embed(self, values, *, batch_size: int):
+            assert batch_size == 1
+            with self.guard:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            time.sleep(0.05)
+            with self.guard:
+                self.active -= 1
+            return [[float(index)] for index, _ in enumerate(values)]
+
+    model = Model()
+    encoder = FastEmbedEncoder(model, model_id="test")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        scores = list(pool.map(lambda _: encoder.score("query", ["passage"]), range(2)))
+
+    assert scores == [[0.0], [0.0]]
+    assert model.max_active == 1
 
 
 def test_single_verify_uses_versioned_provider_factory(
