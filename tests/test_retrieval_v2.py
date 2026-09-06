@@ -67,6 +67,49 @@ def test_source_candidates_are_diverse_and_deterministic(tmp_path: Path) -> None
     assert first == second
 
 
+def test_source_candidates_round_robin_before_dense_cap_preserves_sources(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        ("a-1", "Source A", "https://a.test/", "common alpha one"),
+        ("a-2", "Source A", "https://a.test/", "common alpha two"),
+        ("b-1", "Source B", "https://b.test/", "common beta one"),
+        ("b-2", "Source B", "https://b.test/", "common beta two"),
+        ("c-1", "Source C", "https://c.test/", "common gamma one"),
+        ("c-2", "Source C", "https://c.test/", "common gamma two"),
+    ]
+    path = tmp_path / "claim-1.jsonl"
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for evidence_id, title, source_url, text in rows:
+            handle.write(
+                json.dumps(
+                    {
+                        "evidence_id": evidence_id,
+                        "title": title,
+                        "source_url": source_url,
+                        "text": text,
+                        "snapshot_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                    }
+                )
+                + "\n"
+            )
+
+    candidates = source_candidates(
+        load_frozen_index(path),
+        "common",
+        source_candidate_k=3,
+        passages_per_source=2,
+        dense_candidate_k=4,
+    )
+
+    assert len(candidates) == 4
+    assert [item.source_key for item in candidates[:3]] == [
+        "https://a.test/",
+        "https://b.test/",
+        "https://c.test/",
+    ]
+
+
 class FakeEncoder:
     model_id = "fixture-dense"
 

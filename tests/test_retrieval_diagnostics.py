@@ -454,7 +454,7 @@ async def test_hybrid_diagnostic_uses_configured_candidate_limits(tmp_path: Path
         settings=settings,
     ).retrieve("dev-0", "query")
 
-    assert observation.candidate_evidence_ids == ["a-1", "a-2", "b-1"]
+    assert observation.candidate_evidence_ids == ["a-1", "b-1", "a-2"]
     assert len(observation.final_evidence_ids) == 2
 
 

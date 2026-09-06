@@ -83,9 +83,20 @@ def source_candidates(
 
     ranked_sources = sorted(by_source.items(), key=source_key)[:source_candidate_k]
     candidates: list[RetrievalCandidate] = []
-    for source_rank, (canonical_url, rows) in enumerate(ranked_sources):
-        for record, score in sorted(rows, key=sentence_key)[:passages_per_source]:
-            candidates.append(RetrievalCandidate(record, canonical_url, score, source_rank))
+    ranked_passages = [
+        (canonical_url, sorted(rows, key=sentence_key)[:passages_per_source])
+        for canonical_url, rows in ranked_sources
+    ]
+    for passage_rank in range(passages_per_source):
+        for source_rank, (canonical_url, rows) in enumerate(ranked_passages):
+            if passage_rank >= len(rows):
+                continue
+            record, score = rows[passage_rank]
+            candidates.append(
+                RetrievalCandidate(record, canonical_url, score, source_rank)
+            )
+            if len(candidates) >= dense_candidate_k:
+                return candidates
     return candidates[:dense_candidate_k]
 
 
