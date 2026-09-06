@@ -323,6 +323,19 @@ class SingleVerifier:
                     else {}
                 ),
             )
+        except Exception as exc:
+            if _safety_stop(exc):
+                raise
+            return VerificationEnvelope(
+                result=failed_result(
+                    claim_id,
+                    initial_route=None,
+                    failure_stage="pre_route",
+                    error_code="PROBE_RETRIEVAL_FAILED",
+                ),
+                evidence_ids=frozenset(),
+            )
+        try:
             response = await self.llm.invoke(
                 run_id=run_id,
                 node="single",

@@ -133,6 +133,21 @@ async def test_hardened_single_verifier_uses_hardened_prompt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_single_verifier_types_pre_route_failure_when_retrieval_fails() -> None:
+    verifier = SingleVerifier(
+        FailingProvider(), LLM(object()), EvidenceSettings(), GenerationSettings()
+    )
+
+    envelope = await verifier.verify_with_evidence("run", "dev-0", "claim", features())
+
+    assert envelope.result.status is ResultStatus.FAILED
+    assert envelope.result.initial_route is None
+    assert envelope.result.failure_stage == "pre_route"
+    assert envelope.result.errors == ["PROBE_RETRIEVAL_FAILED"]
+    assert envelope.evidence_ids == set()
+
+
+@pytest.mark.asyncio
 async def test_hardened_worker_uses_hardened_prompt() -> None:
     task = VerificationTask(task_id="t0", claim_unit_ids=["u0"], query="claim")
     llm = LLM(
