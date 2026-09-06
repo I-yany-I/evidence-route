@@ -50,7 +50,7 @@ def verify_model_receipt(model_root: Path, receipt_path: Path) -> dict[str, obje
 
 
 class FastEmbedEncoder:
-    _MAX_PASSAGES_PER_BATCH = 32
+    _MAX_PASSAGES_PER_BATCH = 8
 
     def __init__(self, model: object, *, model_id: str) -> None:
         self._model = model

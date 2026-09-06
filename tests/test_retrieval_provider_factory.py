@@ -129,7 +129,7 @@ def test_fastembed_encoder_scores_passages_in_bounded_batches() -> None:
     scores = encoder.score("query", [f"passage-{index}" for index in range(65)])
 
     assert len(scores) == 65
-    assert model.batch_sizes == [33, 33, 2]
+    assert model.batch_sizes == [9, 9, 9, 9, 9, 9, 9, 9, 2]
 
 
 def test_single_verify_uses_versioned_provider_factory(
