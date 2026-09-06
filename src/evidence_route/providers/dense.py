@@ -50,6 +50,8 @@ def verify_model_receipt(model_root: Path, receipt_path: Path) -> dict[str, obje
 
 
 class FastEmbedEncoder:
+    _MAX_PASSAGES_PER_BATCH = 32
+
     def __init__(self, model: object, *, model_id: str) -> None:
         self._model = model
         self.model_id = model_id
@@ -74,12 +76,16 @@ class FastEmbedEncoder:
         if not query.strip():
             raise RetrievalModelError("query must not be empty")
         try:
-            vectors = list(self._model.embed([query, *passages]))
-            query_vector = np.asarray(vectors[0], dtype=np.float32)
-            return [
-                float(np.dot(query_vector, np.asarray(vector, dtype=np.float32)))
-                for vector in vectors[1:]
-            ]
+            scores: list[float] = []
+            for start in range(0, len(passages), self._MAX_PASSAGES_PER_BATCH):
+                batch = passages[start : start + self._MAX_PASSAGES_PER_BATCH]
+                vectors = list(self._model.embed([query, *batch]))
+                query_vector = np.asarray(vectors[0], dtype=np.float32)
+                scores.extend(
+                    float(np.dot(query_vector, np.asarray(vector, dtype=np.float32)))
+                    for vector in vectors[1:]
+                )
+            return scores
         except Exception as exc:
             raise RetrievalModelError(f"dense reranking failed: {exc}") from exc
 

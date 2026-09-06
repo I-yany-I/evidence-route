@@ -69,6 +69,7 @@ from evidence_route.llm import (
     ensure_v1,
     make_call_id,
 )
+from evidence_route.providers.dense import RetrievalModelError
 from evidence_route.retrieval import build_evidence_provider, configured_model_receipt_path
 from evidence_route.routing import HybridRouter
 
@@ -132,7 +133,10 @@ def _status_for_error(exc: Exception) -> tuple[CampaignStatus, bool, str]:
         "BillingStateError",
     }:
         return CampaignStatus.INCOMPLETE_COST_UNCERTAIN, True, "BILLING_UNCERTAIN"
-    if "model drift" in message or "raw model" in message or "model" in name.lower():
+    if (
+        not isinstance(exc, RetrievalModelError)
+        and ("model drift" in message or "raw model" in message or "model" in name.lower())
+    ):
         return CampaignStatus.INCOMPLETE_MODEL_DRIFT, False, "MODEL_DRIFT"
     if "accounting" in message or "usage" in message:
         return CampaignStatus.INCOMPLETE_USAGE, False, "USAGE_MISSING"

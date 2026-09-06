@@ -45,6 +45,7 @@ from evidence_route.evaluation.production_evaluation import (
 from evidence_route.evaluation.runner import CampaignProcessInterruption
 from evidence_route.execution import build_run_artifact, load_price_config
 from evidence_route.llm import BillingUncertain, RawCompletion
+from evidence_route.providers.dense import RetrievalModelError
 
 
 @pytest.mark.parametrize("experiment_mode", [False, True])
@@ -74,6 +75,16 @@ def test_billing_recovery_includes_running_item_after_process_kill() -> None:
         running,
         stopped,
     ]
+
+
+def test_retrieval_model_runtime_failure_is_internal_error_not_model_drift() -> None:
+    status, billing_uncertain, code = production_calibration_module._status_for_error(
+        RetrievalModelError("dense reranking failed: allocator out of memory")
+    )
+
+    assert status is CampaignStatus.FAILED
+    assert billing_uncertain is False
+    assert code == "INTERNAL_ERROR"
 
 
 def test_authorized_calibration_recovery_requeues_stopped_case() -> None:

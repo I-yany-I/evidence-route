@@ -13,7 +13,7 @@ from evidence_route.config import EvidenceSettings, load_app_config
 from evidence_route.evaluation.production_evaluation import ProductionCampaignService
 from evidence_route.providers.averitec import AveritecFrozenProvider
 from evidence_route.providers.averitec_v2 import AveritecHybridProvider
-from evidence_route.providers.dense import RetrievalModelError
+from evidence_route.providers.dense import FastEmbedEncoder, RetrievalModelError
 from evidence_route.retrieval import build_evidence_provider, configured_model_receipt_path
 
 MODEL_REVISION = "52398278842ec682c6f32300af41344b1c0b0bb2"
@@ -112,6 +112,24 @@ def test_provider_factory_builds_v2_only_for_matching_identity(tmp_path: Path) -
 
     assert isinstance(provider, AveritecHybridProvider)
     assert provider.encoder.model_id == "BAAI/bge-small-en-v1.5"
+
+
+def test_fastembed_encoder_scores_passages_in_bounded_batches() -> None:
+    class Model:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        def embed(self, values):
+            self.batch_sizes.append(len(values))
+            return [[float(index)] for index, _ in enumerate(values)]
+
+    model = Model()
+    encoder = FastEmbedEncoder(model, model_id="test")
+
+    scores = encoder.score("query", [f"passage-{index}" for index in range(65)])
+
+    assert len(scores) == 65
+    assert model.batch_sizes == [33, 33, 2]
 
 
 def test_single_verify_uses_versioned_provider_factory(
