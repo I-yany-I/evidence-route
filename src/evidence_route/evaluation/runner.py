@@ -22,7 +22,7 @@ from evidence_route.artifacts import (
     atomic_write_json,
 )
 from evidence_route.budget import BudgetExceeded, PriceConfig, UsageUnavailable
-from evidence_route.config import GenerationSettings
+from evidence_route.config import BudgetSettings, GenerationSettings, HardeningSettings
 from evidence_route.contracts import ResultStatus, Strategy, Usage, VerificationResult
 from evidence_route.evaluation.activity import (
     CampaignItemState,
@@ -137,6 +137,30 @@ def estimate_call_bounds(
         reserve_basis_points=reserve_basis_points,
         startup_required_micro_cny=startup,
     )
+
+
+def build_campaign_budget_preview(
+    *,
+    generation: GenerationSettings,
+    hardening: HardeningSettings,
+    budget: BudgetSettings,
+    pricing: PriceConfig,
+) -> dict[str, object]:
+    """Build the deterministic paid-campaign startup preview."""
+
+    bounds = estimate_call_bounds(
+        compute_gate_a_call_profile(
+            include_multi_recovery=hardening.multi_single_recovery
+        ),
+        generation,
+        pricing,
+        reserve_ratio=budget.reserve_ratio,
+    )
+    return {
+        **bounds.model_dump(mode="json"),
+        "cap_micro_cny": int(budget.estimated_cost_cap_cny * 1_000_000),
+        "paid_execution_started": False,
+    }
 
 
 def _claim_id(claim: object) -> str:
@@ -1113,6 +1137,7 @@ __all__ = [
     "CampaignRunner",
     "CampaignProcessInterruption",
     "build_campaign_schedule",
+    "build_campaign_budget_preview",
     "build_dev_schedule",
     "compute_gate_a_call_profile",
     "estimate_call_bounds",

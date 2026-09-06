@@ -25,12 +25,13 @@ from evidence_route.config import (
 )
 from evidence_route.contracts import Strategy, StrictModel
 from evidence_route.evaluation.activity import CallProfile
+from evidence_route.evaluation.lifecycle import sha256_file
 from evidence_route.evaluation.production_calibration import ProductionCalibrationCollector
 from evidence_route.evaluation.production_evaluation import ProductionCampaignService
 from evidence_route.evaluation.reporting import ReportInput, build_report_bundle
 from evidence_route.evaluation.retrieval_diagnostics import run_diagnostic
 from evidence_route.evaluation.runner import (
-    compute_gate_a_call_profile,
+    build_campaign_budget_preview,
     estimate_call_bounds,
 )
 from evidence_route.execution import load_price_config
@@ -352,13 +353,11 @@ class ProductionServices:
         budget = BudgetSettings.model_validate(raw_config.get("budget", {}))
         raw_pricing = yaml.safe_load(pricing_path.read_text(encoding="utf-8")) or {}
         pricing = PriceConfig.model_validate(raw_pricing)
-        bounds = estimate_call_bounds(
-            compute_gate_a_call_profile(
-                include_multi_recovery=hardening.multi_single_recovery
-            ),
-            generation,
-            pricing,
-            reserve_ratio=budget.reserve_ratio,
+        preview = build_campaign_budget_preview(
+            generation=generation,
+            hardening=hardening,
+            budget=budget,
+            pricing=pricing,
         )
         max_items = kwargs.get("max_items", 10)
         if (
@@ -380,12 +379,14 @@ class ProductionServices:
             reserve_ratio=budget.reserve_ratio,
         )
         return {
-            **bounds.model_dump(mode="json"),
-            "cap_micro_cny": int(budget.estimated_cost_cap_cny * 1_000_000),
+            **preview,
+            "activity_id": str(kwargs.get("activity_id", "gate-a")),
+            "campaign_id": str(kwargs.get("campaign_id", "gate-a-dev")),
+            "config_sha256": sha256_file(config_path),
+            "pricing_sha256": sha256_file(pricing_path),
             "batch_max_items": max_items,
             "batch_startup_required_micro_cny": batch_bounds.startup_required_micro_cny,
             "batch_estimate_conservative": True,
-            "paid_execution_started": False,
         }
 
     def evaluate(self, **kwargs: object) -> dict[str, object]:
@@ -445,6 +446,41 @@ class ProductionServices:
                 prompt_bundle=_resolve_from(repository_root, kwargs["prompt_bundle"]),
                 pricing=_resolve_from(repository_root, kwargs["pricing"]),
                 requirements_lock=_resolve_from(repository_root, kwargs["requirements_lock"]),
+                experiment_dir=(
+                    _resolve_from(repository_root, kwargs["experiment_dir"])
+                    if kwargs.get("experiment_dir") is not None
+                    else None
+                ),
+                parent_activity_dir=(
+                    _resolve_from(repository_root, kwargs["parent_activity_dir"])
+                    if kwargs.get("parent_activity_dir") is not None
+                    else None
+                ),
+                parent_report=(
+                    _resolve_from(repository_root, kwargs["parent_report"])
+                    if kwargs.get("parent_report") is not None
+                    else None
+                ),
+                parent_config=(
+                    _resolve_from(repository_root, kwargs["parent_config"])
+                    if kwargs.get("parent_config") is not None
+                    else None
+                ),
+                retrieval_gold_manifest=(
+                    _resolve_from(repository_root, kwargs["retrieval_gold_manifest"])
+                    if kwargs.get("retrieval_gold_manifest") is not None
+                    else None
+                ),
+                retrieval_diagnostic=(
+                    _resolve_from(repository_root, kwargs["retrieval_diagnostic"])
+                    if kwargs.get("retrieval_diagnostic") is not None
+                    else None
+                ),
+                budget_preview=(
+                    _resolve_from(repository_root, kwargs["budget_preview"])
+                    if kwargs.get("budget_preview") is not None
+                    else None
+                ),
             ),
             publish=publish,
             stability_diagnostics=stability_diagnostics,
@@ -569,6 +605,7 @@ def create_app(services: CliServices) -> typer.Typer:
     def evaluate(
         manifest: Annotated[Path, typer.Option("--manifest")] = ...,
         stability_manifest: Annotated[Path, typer.Option("--stability-manifest")] = ...,
+        repository_root: Annotated[Path, typer.Option("--repository-root")] = Path("."),
         config_path: Annotated[Path, typer.Option("--config")] = Path("configs/default.yaml"),
         pricing_path: Annotated[Path, typer.Option("--pricing")] = Path(
             "configs/pricing.local.yaml"
@@ -597,6 +634,33 @@ def create_app(services: CliServices) -> typer.Typer:
         parent_config: Annotated[Path | None, typer.Option("--parent-config")] = None,
         experiment_dir: Annotated[Path | None, typer.Option("--experiment-dir")] = None,
     ) -> None:
+        resolved_repository_root = repository_root.resolve()
+        manifest = _resolve_from(resolved_repository_root, manifest)
+        stability_manifest = _resolve_from(resolved_repository_root, stability_manifest)
+        config_path = _resolve_from(resolved_repository_root, config_path)
+        pricing_path = _resolve_from(resolved_repository_root, pricing_path)
+        corpus_dir = _resolve_from(resolved_repository_root, corpus_dir)
+        activity_dir = _resolve_from(resolved_repository_root, activity_dir)
+        calibration_report = _resolve_from(
+            resolved_repository_root, calibration_report
+        )
+        checkpoint_db = _resolve_from(resolved_repository_root, checkpoint_db)
+        run_store = _resolve_from(resolved_repository_root, run_store)
+        parent_report = (
+            _resolve_from(resolved_repository_root, parent_report)
+            if parent_report is not None
+            else None
+        )
+        parent_config = (
+            _resolve_from(resolved_repository_root, parent_config)
+            if parent_config is not None
+            else None
+        )
+        experiment_dir = (
+            _resolve_from(resolved_repository_root, experiment_dir)
+            if experiment_dir is not None
+            else None
+        )
         common = {
             "manifest": manifest,
             "stability_manifest": stability_manifest,
@@ -626,6 +690,39 @@ def create_app(services: CliServices) -> typer.Typer:
                         err=True,
                     )
                     raise typer.Exit(code=2)
+                experiment_values = (
+                    parent_activity,
+                    parent_report,
+                    parent_config,
+                    experiment_dir,
+                )
+                if not all(value is not None for value in experiment_values) or (
+                    activity_id == "gate-a" or campaign_id == "gate-a-dev"
+                ):
+                    typer.echo(
+                        "paid evaluate requires a new isolated experiment identity with "
+                        "--parent-activity, --parent-report, --parent-config, --experiment-dir, "
+                        "--activity-id, and --campaign-id",
+                        err=True,
+                    )
+                    raise typer.Exit(code=2)
+                assert experiment_dir is not None
+                experiment_root = experiment_dir
+                if experiment_root == resolved_repository_root:
+                    typer.echo(
+                        "--experiment-dir must differ from --repository-root", err=True
+                    )
+                    raise typer.Exit(code=2)
+                for option, path in (
+                    ("--activity-dir", activity_dir),
+                    ("--checkpoint-db", checkpoint_db),
+                    ("--run-store", run_store),
+                ):
+                    try:
+                        path.relative_to(experiment_root)
+                    except ValueError:
+                        typer.echo(f"{option} must be inside --experiment-dir", err=True)
+                        raise typer.Exit(code=2) from None
                 payload = services.evaluate(
                     **common,
                     mode="resume" if resume else "start_after_calibration",
@@ -735,6 +832,19 @@ def create_app(services: CliServices) -> typer.Typer:
         requirements_lock: Annotated[Path, typer.Option("--requirements-lock")] = Path(
             "requirements.lock"
         ),
+        experiment_dir: Annotated[Path | None, typer.Option("--experiment-dir")] = None,
+        parent_activity_dir: Annotated[
+            Path | None, typer.Option("--parent-activity-dir")
+        ] = None,
+        parent_report: Annotated[Path | None, typer.Option("--parent-report")] = None,
+        parent_config: Annotated[Path | None, typer.Option("--parent-config")] = None,
+        retrieval_gold_manifest: Annotated[
+            Path | None, typer.Option("--retrieval-gold-manifest")
+        ] = None,
+        retrieval_diagnostic: Annotated[
+            Path | None, typer.Option("--retrieval-diagnostic")
+        ] = None,
+        budget_preview: Annotated[Path | None, typer.Option("--budget-preview")] = None,
         nltk_data_root: Annotated[Path, typer.Option("--nltk-data-root")] = Path(
             "data/external/nltk"
         ),
@@ -746,6 +856,102 @@ def create_app(services: CliServices) -> typer.Typer:
     ) -> None:
         if readme is not None and not publish:
             typer.echo("--readme requires --publish", err=True)
+            raise typer.Exit(code=2)
+        repository_root = repository_root.resolve()
+        activity_dir = _resolve_from(repository_root, activity_dir)
+        gold_manifest = _resolve_from(repository_root, gold_manifest)
+        output_dir = _resolve_from(repository_root, output_dir)
+        run_store = _resolve_from(repository_root, run_store)
+        runtime_manifest = _resolve_from(repository_root, runtime_manifest)
+        calibration_runtime_manifest = _resolve_from(
+            repository_root, calibration_runtime_manifest
+        )
+        stability_runtime_manifest = _resolve_from(
+            repository_root, stability_runtime_manifest
+        )
+        calibration_report = _resolve_from(repository_root, calibration_report)
+        calibrated_config = _resolve_from(repository_root, calibrated_config)
+        corpus_preparation_receipt = _resolve_from(
+            repository_root, corpus_preparation_receipt
+        )
+        prompt_bundle = _resolve_from(repository_root, prompt_bundle)
+        pricing = _resolve_from(repository_root, pricing)
+        requirements_lock = _resolve_from(repository_root, requirements_lock)
+        nltk_data_root = _resolve_from(repository_root, nltk_data_root)
+        experiment_dir = (
+            _resolve_from(repository_root, experiment_dir)
+            if experiment_dir is not None
+            else None
+        )
+        parent_activity_dir = (
+            _resolve_from(repository_root, parent_activity_dir)
+            if parent_activity_dir is not None
+            else None
+        )
+        parent_report = (
+            _resolve_from(repository_root, parent_report)
+            if parent_report is not None
+            else None
+        )
+        parent_config = (
+            _resolve_from(repository_root, parent_config)
+            if parent_config is not None
+            else None
+        )
+        retrieval_gold_manifest = (
+            _resolve_from(repository_root, retrieval_gold_manifest)
+            if retrieval_gold_manifest is not None
+            else None
+        )
+        retrieval_diagnostic = (
+            _resolve_from(repository_root, retrieval_diagnostic)
+            if retrieval_diagnostic is not None
+            else None
+        )
+        budget_preview = (
+            _resolve_from(repository_root, budget_preview)
+            if budget_preview is not None
+            else None
+        )
+        readme = (
+            _resolve_from(repository_root, readme) if readme is not None else None
+        )
+        recovery_values = (
+            experiment_dir,
+            parent_report,
+            parent_config,
+            retrieval_gold_manifest,
+            retrieval_diagnostic,
+            budget_preview,
+        )
+        if experiment_dir is not None:
+            experiment_root = experiment_dir
+            if experiment_root == repository_root:
+                typer.echo(
+                    "--experiment-dir must differ from --repository-root", err=True
+                )
+                raise typer.Exit(code=2)
+            mutable_paths = [
+                ("--activity-dir", activity_dir),
+                ("--run-store", run_store),
+                ("--output-dir", output_dir),
+            ]
+            if readme is not None:
+                mutable_paths.append(("--readme", readme))
+            for option, path in mutable_paths:
+                try:
+                    path.relative_to(experiment_root)
+                except ValueError:
+                    typer.echo(f"{option} must be inside --experiment-dir", err=True)
+                    raise typer.Exit(code=2) from None
+        if any(value is not None for value in recovery_values) and not all(
+            value is not None for value in recovery_values
+        ):
+            typer.echo(
+                "recovery report requires --experiment-dir, --parent-report, --parent-config, "
+                "--retrieval-gold-manifest, --retrieval-diagnostic, and --budget-preview",
+                err=True,
+            )
             raise typer.Exit(code=2)
         try:
             payload = services.report(
@@ -763,6 +969,13 @@ def create_app(services: CliServices) -> typer.Typer:
                 prompt_bundle=prompt_bundle,
                 pricing=pricing,
                 requirements_lock=requirements_lock,
+                experiment_dir=experiment_dir,
+                parent_activity_dir=parent_activity_dir,
+                parent_report=parent_report,
+                parent_config=parent_config,
+                retrieval_gold_manifest=retrieval_gold_manifest,
+                retrieval_diagnostic=retrieval_diagnostic,
+                budget_preview=budget_preview,
                 nltk_data_root=nltk_data_root,
                 publish=publish,
                 stability_diagnostics=stability_diagnostics,

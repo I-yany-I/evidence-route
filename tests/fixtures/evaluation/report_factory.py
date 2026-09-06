@@ -180,7 +180,10 @@ class ReportInputFactory:
             "routing:\n"
             "  clear_multi_clauses: 2\n"
             "hardening:\n"
-            "  deterministic_decomposition: true\n",
+            "  deterministic_decomposition: true\n"
+            "budget:\n"
+            "  estimated_cost_cap_cny: 350.0\n"
+            "  reserve_ratio: 0.2\n",
             encoding="utf-8",
         )
         claims = [{"claim_id": f"dev-{index}"} for index in range(80)]

@@ -125,6 +125,25 @@ def test_retrieval_v2_enables_source_cap_without_hardening_flags(
     }
 
 
+def test_quality_recovery_v2_combines_retrieval_and_stability_hardening(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EVIDENCE_ROUTE_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("EVIDENCE_ROUTE_API_KEY", "test-key")
+    monkeypatch.setenv("EVIDENCE_ROUTE_MODEL", "relay-model")
+
+    config = load_app_config(Path("configs/evidence-quality-recovery-v2.yaml"))
+
+    assert config.routing.clear_single_min_sources == 1
+    assert config.routing.low_confidence == 0.75
+    assert all(config.hardening.model_dump(mode="json").values())
+    assert config.evidence.retrieval_mode == "source_hybrid_v2"
+    assert config.evidence.acquisition_weight == 0.3
+    assert config.evidence.source_candidate_k == 256
+    assert config.evidence.passages_per_source == 1
+    assert config.budget.estimated_cost_cap_cny == 750.0
+
+
 def test_hardening_fields_do_not_change_historical_routing_hash() -> None:
     assert stable_hash(RoutingSettings().model_dump(mode="json")) == stable_hash(
         {

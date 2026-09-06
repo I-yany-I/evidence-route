@@ -35,7 +35,7 @@ The baseline command and its input hashes are recorded in a new experiment direc
 
 ## Stage 2: retrieval and citation recovery
 
-Add a source-aware candidate generator behind an explicit retrieval mode. Preserve the current sentence BM25 mode as the default and make any new mode opt-in. Candidate ranking uses claim units, source identity, normalized URL, and deterministic tie-breakers. Candidate count and per-source caps are bounded. Deduplication retains the first item in frozen retrieval order while preserving original evidence IDs and text.
+Add a source-aware candidate generator behind an explicit retrieval mode. Preserve the current sentence BM25 mode as the default and make any new mode opt-in. Candidate ranking uses claim units, source identity, normalized URL, the upstream frozen acquisition order, and deterministic tie-breakers. Acquisition order is derived only from the first occurrence of each canonical URL in the runtime corpus; it never reads scorer data or parses evidence IDs. Candidate count and per-source caps are bounded. Deduplication retains the first item in frozen retrieval order while preserving original evidence IDs and text.
 
 Add an offline calibration gate that compares retrieved candidate IDs with gold-source IDs without exposing gold data to runtime code. Fail closed when the selected retrieval asset or receipt is missing or mismatched. Citation projection must be deterministic across repeated runs, cover all required claim units when possible, remove duplicate URLs, and reject citations whose evidence was not supplied to the verifier.
 
@@ -48,6 +48,11 @@ Any incomplete, failed, cancelled, or not-run result remains visible and is pena
 ## Stage 4: provider and cost hardening
 
 Add contract tests for OpenAI-compatible responses with missing usage, malformed structured output, response model drift, transient transport errors, and billing uncertainty. Retries require an explicit bounded budget and idempotent call identity. Missing usage or uncertain billing stops strict evaluation. Model IDs, endpoint hash, price source, and usage source are persisted for every call.
+
+The paid recovery campaign uses a new `evidence-quality-recovery-v2` configuration identity. It combines
+the previously calibrated routing thresholds and all stability-v4 hardening switches with the frozen
+source-hybrid retrieval model, acquisition-rank weight, and CNY 750 campaign cap. The retrieval-only v2
+configuration remains available for isolated diagnostics and does not silently enable graph hardening.
 
 ## Testing and release gates
 

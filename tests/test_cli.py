@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from typer.testing import CliRunner
 
 from evidence_route.cli import CliServices, ProductionServices, create_app
@@ -198,6 +199,7 @@ def test_evaluate_defaults_to_budget_preview_without_network(tmp_path: Path) -> 
 
 def test_paid_evaluate_forwards_batch_limit(tmp_path: Path) -> None:
     services = FakeServices()
+    experiment_dir = tmp_path / "experiment"
     result = CliRunner().invoke(
         create_app(services),
         [
@@ -207,9 +209,25 @@ def test_paid_evaluate_forwards_batch_limit(tmp_path: Path) -> None:
             "--stability-manifest",
             str(tmp_path / "stability.json"),
             "--activity-dir",
-            str(tmp_path / "activity"),
+            str(experiment_dir / "activity"),
+            "--checkpoint-db",
+            str(experiment_dir / "checkpoints.sqlite3"),
+            "--run-store",
+            str(experiment_dir / "run-store.sqlite3"),
             "--calibration-report",
             str(tmp_path / "calibration-report.json"),
+            "--activity-id",
+            "quality-recovery-v2",
+            "--campaign-id",
+            "quality-recovery-v2-dev",
+            "--parent-activity",
+            "gate-a",
+            "--parent-report",
+            str(tmp_path / "parent-report.json"),
+            "--parent-config",
+            str(tmp_path / "parent-config.yaml"),
+            "--experiment-dir",
+            str(experiment_dir),
             "--accept-paid-campaign",
             "--start-after-calibration",
             "--max-items",
@@ -223,6 +241,7 @@ def test_paid_evaluate_forwards_batch_limit(tmp_path: Path) -> None:
 
 def test_paid_evaluate_forwards_isolated_experiment_identity(tmp_path: Path) -> None:
     services = FakeServices()
+    experiment_dir = tmp_path / "experiment"
     result = CliRunner().invoke(
         create_app(services),
         [
@@ -232,11 +251,19 @@ def test_paid_evaluate_forwards_isolated_experiment_identity(tmp_path: Path) -> 
             "--stability-manifest",
             str(tmp_path / "stability.json"),
             "--activity-dir",
-            str(tmp_path / "activity"),
+            str(experiment_dir / "activity"),
+            "--checkpoint-db",
+            str(experiment_dir / "checkpoints.sqlite3"),
+            "--run-store",
+            str(experiment_dir / "run-store.sqlite3"),
             "--calibration-report",
             str(tmp_path / "calibration-report.json"),
             "--accept-paid-campaign",
             "--start-after-calibration",
+            "--activity-id",
+            "quality-recovery-v2",
+            "--campaign-id",
+            "quality-recovery-v2-dev",
             "--parent-activity",
             "gate-a-20260830",
             "--parent-report",
@@ -253,6 +280,121 @@ def test_paid_evaluate_forwards_isolated_experiment_identity(tmp_path: Path) -> 
     assert services.last_evaluate["parent_report"] == tmp_path / "parent-report.json"
     assert services.last_evaluate["parent_config"] == tmp_path / "parent-config.yaml"
     assert services.last_evaluate["experiment_dir"] == tmp_path / "experiment"
+
+
+def test_paid_evaluate_forwards_paths_resolved_from_repository_root(
+    tmp_path: Path,
+) -> None:
+    services = FakeServices()
+    repository_root = tmp_path / "repo"
+    experiment_dir = repository_root / "experiments/recovery"
+    result = CliRunner().invoke(
+        create_app(services),
+        [
+            "evaluate",
+            "--repository-root",
+            str(repository_root),
+            "--manifest",
+            "data/dev.json",
+            "--stability-manifest",
+            "data/stability.json",
+            "--activity-dir",
+            "experiments/recovery/activity",
+            "--checkpoint-db",
+            "experiments/recovery/checkpoints.sqlite3",
+            "--run-store",
+            "experiments/recovery/run-store.sqlite3",
+            "--calibration-report",
+            "reports/calibration.json",
+            "--activity-id",
+            "quality-recovery-v2",
+            "--campaign-id",
+            "quality-recovery-v2-dev",
+            "--parent-activity",
+            "gate-a",
+            "--parent-report",
+            "reports/parent.json",
+            "--parent-config",
+            "configs/parent.yaml",
+            "--experiment-dir",
+            str(experiment_dir),
+            "--accept-paid-campaign",
+            "--start-after-calibration",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert services.last_evaluate["activity_dir"] == (
+        experiment_dir / "activity"
+    ).resolve()
+    assert services.last_evaluate["checkpoint_db"] == (
+        experiment_dir / "checkpoints.sqlite3"
+    ).resolve()
+    assert services.last_evaluate["run_store"] == (
+        experiment_dir / "run-store.sqlite3"
+    ).resolve()
+    assert services.last_evaluate["experiment_dir"] == experiment_dir.resolve()
+
+
+def test_paid_evaluate_requires_new_isolated_experiment(tmp_path: Path) -> None:
+    services = FakeServices()
+    result = CliRunner().invoke(
+        create_app(services),
+        [
+            "evaluate",
+            "--manifest",
+            str(tmp_path / "dev.json"),
+            "--stability-manifest",
+            str(tmp_path / "stability.json"),
+            "--activity-dir",
+            str(tmp_path / "activity"),
+            "--accept-paid-campaign",
+            "--start-after-calibration",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "new isolated experiment" in result.output
+    assert services.evaluate_calls == 0
+
+
+def test_paid_evaluate_rejects_writes_outside_experiment_directory(tmp_path: Path) -> None:
+    services = FakeServices()
+    experiment_dir = tmp_path / "experiment"
+    result = CliRunner().invoke(
+        create_app(services),
+        [
+            "evaluate",
+            "--manifest",
+            str(tmp_path / "dev.json"),
+            "--stability-manifest",
+            str(tmp_path / "stability.json"),
+            "--activity-dir",
+            str(tmp_path / "outside" / "activity"),
+            "--checkpoint-db",
+            str(experiment_dir / "checkpoints.sqlite3"),
+            "--run-store",
+            str(experiment_dir / "run-store.sqlite3"),
+            "--activity-id",
+            "quality-recovery-v2",
+            "--campaign-id",
+            "quality-recovery-v2-dev",
+            "--parent-activity",
+            "gate-a",
+            "--parent-report",
+            str(tmp_path / "parent-report.json"),
+            "--parent-config",
+            str(tmp_path / "parent-config.yaml"),
+            "--experiment-dir",
+            str(experiment_dir),
+            "--accept-paid-campaign",
+            "--start-after-calibration",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "inside --experiment-dir" in result.output
+    assert services.evaluate_calls == 0
 
 
 def test_calibrate_forwards_default_and_explicit_case_limits(tmp_path: Path) -> None:
@@ -310,6 +452,36 @@ def test_v4_preview_includes_recovery_call_allowance() -> None:
     assert payload["batch_max_items"] == 10
     assert payload["batch_startup_required_micro_cny"] > 0
     assert payload["batch_startup_required_micro_cny"] < payload["cap_micro_cny"]
+
+
+def test_quality_recovery_v2_cap_covers_strict_relay_startup(
+    tmp_path: Path,
+) -> None:
+    pricing = tmp_path / "pricing.yaml"
+    pricing.write_text(
+        "provider: relay\n"
+        "currency: CNY\n"
+        "input_per_million: 36.0\n"
+        "output_per_million: 216.0\n"
+        "price_source: pinned-test-rate\n"
+        "strict_evaluation: true\n",
+        encoding="utf-8",
+    )
+
+    payload = ProductionServices().preview_campaign(
+        config_path=Path("configs/evidence-quality-recovery-v2.yaml"),
+        pricing_path=pricing,
+        max_items=10,
+        activity_id="quality-recovery-v2",
+        campaign_id="quality-recovery-v2-dev",
+    )
+
+    assert payload["startup_required_micro_cny"] == 713_871_360
+    assert payload["startup_required_micro_cny"] <= payload["cap_micro_cny"]
+    assert payload["activity_id"] == "quality-recovery-v2"
+    assert payload["campaign_id"] == "quality-recovery-v2-dev"
+    assert payload["config_sha256"]
+    assert payload["pricing_sha256"]
 
 
 def test_paid_evaluate_requires_exactly_one_lifecycle_flag(tmp_path: Path) -> None:
@@ -444,6 +616,245 @@ def test_report_forwards_stability_diagnostics_flag(tmp_path: Path) -> None:
     assert services.report_calls == 1
     assert services.report_kwargs is not None
     assert services.report_kwargs["stability_diagnostics"] is True
+
+
+def test_report_forwards_recovery_gate_evidence(tmp_path: Path) -> None:
+    services = FakeServices()
+    experiment_dir = tmp_path / "experiment"
+    result = CliRunner().invoke(
+        create_app(services),
+        [
+            "report",
+            "--activity-dir",
+            str(experiment_dir / "activity"),
+            "--gold-manifest",
+            str(tmp_path / "gold.json"),
+            "--output-dir",
+            str(experiment_dir / "report"),
+            "--run-store",
+            str(experiment_dir / "run-store.sqlite3"),
+            "--experiment-dir",
+            str(experiment_dir),
+            "--parent-activity-dir",
+            str(tmp_path / "parent-activity"),
+            "--parent-report",
+            str(tmp_path / "parent-report.json"),
+            "--parent-config",
+            str(tmp_path / "parent-config.yaml"),
+            "--retrieval-gold-manifest",
+            str(tmp_path / "retrieval-gold.json"),
+            "--retrieval-diagnostic",
+            str(tmp_path / "retrieval.json"),
+            "--budget-preview",
+            str(tmp_path / "budget.json"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert services.report_kwargs is not None
+    assert services.report_kwargs["experiment_dir"] == experiment_dir
+    assert services.report_kwargs["parent_activity_dir"] == tmp_path / "parent-activity"
+    assert services.report_kwargs["parent_report"] == tmp_path / "parent-report.json"
+    assert services.report_kwargs["parent_config"] == tmp_path / "parent-config.yaml"
+    assert (
+        services.report_kwargs["retrieval_gold_manifest"]
+        == tmp_path / "retrieval-gold.json"
+    )
+    assert services.report_kwargs["retrieval_diagnostic"] == tmp_path / "retrieval.json"
+    assert services.report_kwargs["budget_preview"] == tmp_path / "budget.json"
+
+
+def test_recovery_report_rejects_output_outside_experiment_directory(tmp_path: Path) -> None:
+    services = FakeServices()
+    result = CliRunner().invoke(
+        create_app(services),
+        [
+            "report",
+            "--activity-dir",
+            str(tmp_path / "experiment" / "activity"),
+            "--gold-manifest",
+            str(tmp_path / "gold.json"),
+            "--output-dir",
+            str(tmp_path / "historical-report"),
+            "--experiment-dir",
+            str(tmp_path / "experiment"),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "inside --experiment-dir" in result.output
+    assert services.report_calls == 0
+
+
+@pytest.mark.parametrize("option", ["--activity-dir", "--run-store", "--readme"])
+def test_recovery_report_rejects_mutable_path_outside_experiment_directory(
+    tmp_path: Path, option: str
+) -> None:
+    services = FakeServices()
+    experiment_dir = tmp_path / "experiment"
+    paths = {
+        "--activity-dir": experiment_dir / "activity",
+        "--run-store": experiment_dir / "run-store.sqlite3",
+        "--readme": experiment_dir / "README.md",
+    }
+    paths[option] = tmp_path / "outside" / paths[option].name
+    result = CliRunner().invoke(
+        create_app(services),
+        [
+            "report",
+            "--activity-dir",
+            str(paths["--activity-dir"]),
+            "--gold-manifest",
+            str(tmp_path / "gold.json"),
+            "--output-dir",
+            str(experiment_dir / "report"),
+            "--run-store",
+            str(paths["--run-store"]),
+            "--readme",
+            str(paths["--readme"]),
+            "--publish",
+            "--experiment-dir",
+            str(experiment_dir),
+            "--parent-report",
+            str(tmp_path / "parent-report.json"),
+            "--parent-config",
+            str(tmp_path / "parent-config.yaml"),
+            "--retrieval-gold-manifest",
+            str(tmp_path / "retrieval-gold.json"),
+            "--retrieval-diagnostic",
+            str(tmp_path / "retrieval.json"),
+            "--budget-preview",
+            str(tmp_path / "budget.json"),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert f"{option} must be inside --experiment-dir" in result.output
+    assert services.report_calls == 0
+
+
+def test_recovery_report_resolves_relative_paths_from_repository_root_before_isolation(
+    tmp_path: Path,
+) -> None:
+    services = FakeServices()
+    repository_root = tmp_path / "repo"
+    experiment_dir = repository_root / "experiments/recovery"
+    result = CliRunner().invoke(
+        create_app(services),
+        [
+            "report",
+            "--repository-root",
+            str(repository_root),
+            "--activity-dir",
+            "experiments/recovery/activity",
+            "--gold-manifest",
+            "gold.json",
+            "--output-dir",
+            str(experiment_dir / "report"),
+            "--run-store",
+            "experiments/recovery/run-store.sqlite3",
+            "--experiment-dir",
+            "experiments/recovery",
+            "--parent-report",
+            "parent-report.json",
+            "--parent-config",
+            "parent-config.yaml",
+            "--retrieval-gold-manifest",
+            "retrieval-gold.json",
+            "--retrieval-diagnostic",
+            "retrieval.json",
+            "--budget-preview",
+            "budget.json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert services.report_kwargs["experiment_dir"] == experiment_dir.resolve()
+    assert services.report_kwargs["activity_dir"] == (experiment_dir / "activity").resolve()
+    assert services.report_kwargs["run_store"] == (
+        experiment_dir / "run-store.sqlite3"
+    ).resolve()
+    assert services.report_kwargs["output_dir"] == (experiment_dir / "report").resolve()
+
+
+def test_recovery_report_rejects_repository_root_as_experiment_directory(
+    tmp_path: Path,
+) -> None:
+    services = FakeServices()
+    result = CliRunner().invoke(
+        create_app(services),
+        [
+            "report",
+            "--repository-root",
+            str(tmp_path),
+            "--activity-dir",
+            str(tmp_path / "activity"),
+            "--gold-manifest",
+            str(tmp_path / "gold.json"),
+            "--output-dir",
+            str(tmp_path / "report"),
+            "--run-store",
+            str(tmp_path / "run-store.sqlite3"),
+            "--experiment-dir",
+            str(tmp_path),
+            "--parent-report",
+            str(tmp_path / "parent-report.json"),
+            "--parent-config",
+            str(tmp_path / "parent-config.yaml"),
+            "--retrieval-gold-manifest",
+            str(tmp_path / "retrieval-gold.json"),
+            "--retrieval-diagnostic",
+            str(tmp_path / "retrieval.json"),
+            "--budget-preview",
+            str(tmp_path / "budget.json"),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "must differ from --repository-root" in result.output
+    assert services.report_calls == 0
+
+
+def test_paid_evaluate_rejects_repository_root_as_experiment_directory(
+    tmp_path: Path,
+) -> None:
+    services = FakeServices()
+    result = CliRunner().invoke(
+        create_app(services),
+        [
+            "evaluate",
+            "--manifest",
+            str(tmp_path / "dev.json"),
+            "--stability-manifest",
+            str(tmp_path / "stability.json"),
+            "--activity-dir",
+            str(tmp_path / "activity"),
+            "--checkpoint-db",
+            str(tmp_path / "checkpoints.sqlite3"),
+            "--run-store",
+            str(tmp_path / "run-store.sqlite3"),
+            "--activity-id",
+            "quality-recovery-v2",
+            "--campaign-id",
+            "quality-recovery-v2-dev",
+            "--parent-activity",
+            "gate-a",
+            "--parent-report",
+            str(tmp_path / "parent-report.json"),
+            "--parent-config",
+            str(tmp_path / "parent-config.yaml"),
+            "--experiment-dir",
+            str(tmp_path),
+            "--repository-root",
+            str(tmp_path),
+            "--accept-paid-campaign",
+            "--start-after-calibration",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "must differ from --repository-root" in result.output
+    assert services.evaluate_calls == 0
 
 
 def test_production_report_resolves_relative_paths_from_repository_root(

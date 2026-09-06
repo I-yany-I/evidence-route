@@ -17,7 +17,7 @@ import yaml
 from pydantic import Field, ValidationError
 
 from evidence_route.artifacts import SQLiteRunStore
-from evidence_route.config import HardeningSettings
+from evidence_route.config import BudgetSettings, GenerationSettings, HardeningSettings
 from evidence_route.contracts import ResultStatus, Strategy, StrictModel, Usage, Verdict
 from evidence_route.evaluation.activity import (
     ActivityRecord,
@@ -35,6 +35,12 @@ from evidence_route.evaluation.calibration import (
     load_calibration_plan,
     load_calibration_state,
 )
+from evidence_route.evaluation.experiment import (
+    StabilityExperimentIdentity,
+    load_experiment_identity,
+    validate_parent_baseline,
+    verify_repeat_zero_reuse,
+)
 from evidence_route.evaluation.lifecycle import endpoint_config_hash, load_activity
 from evidence_route.evaluation.metrics import (
     paired_bootstrap_difference,
@@ -44,7 +50,11 @@ from evidence_route.evaluation.metrics import (
     summarize_operations,
 )
 from evidence_route.evaluation.official import run_official_evaluators, select_completed_triples
-from evidence_route.evaluation.runner import build_campaign_schedule
+from evidence_route.evaluation.retrieval_diagnostics import evaluate_retrieval_gates
+from evidence_route.evaluation.runner import (
+    build_campaign_budget_preview,
+    build_campaign_schedule,
+)
 from evidence_route.evaluation.runtime_manifest import load_runtime_manifest
 from evidence_route.evaluation.scorer_manifest import align_runtime_and_gold, load_gold_manifest
 from evidence_route.evaluation.stability import (
@@ -86,6 +96,13 @@ class ReportInput:
     prompt_bundle: Path | None = None
     pricing: Path | None = None
     requirements_lock: Path | None = None
+    experiment_dir: Path | None = None
+    parent_activity_dir: Path | None = None
+    parent_report: Path | None = None
+    parent_config: Path | None = None
+    retrieval_gold_manifest: Path | None = None
+    retrieval_diagnostic: Path | None = None
+    budget_preview: Path | None = None
     # These switches are intentionally opt-in for ephemeral offline fixtures.  The CLI keeps
     # strict publication defaults: a real report must audit Git and rerun pinned evaluators.
     require_git: bool = True
@@ -218,6 +235,378 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def evaluate_recovery_gates(
+    *,
+    retrieval_diagnostic: Path,
+    budget_preview: Path,
+    stability: dict[str, object],
+    stability_evidence_sha256: str,
+    quality_macro_f1: float,
+    quality_evidence_sha256: str,
+    quality_manifest_count: int,
+    expected_cap_micro_cny: int,
+) -> dict[str, dict[str, object]]:
+    retrieval_path = Path(retrieval_diagnostic)
+    budget_path = Path(budget_preview)
+    retrieval_payload = json.loads(retrieval_path.read_text(encoding="utf-8"))
+    if not isinstance(retrieval_payload, dict):
+        raise ValueError("retrieval diagnostic must contain a JSON object")
+    retrieval_summary = retrieval_payload.get("summary")
+    retrieval_records = retrieval_payload.get("records")
+    if not isinstance(retrieval_summary, dict) or not isinstance(retrieval_records, list):
+        raise ValueError("retrieval diagnostic is missing summary or records")
+    retrieval_checks = evaluate_retrieval_gates(retrieval_summary, retrieval_records)
+
+    consistent = stability.get("consistent")
+    total = stability.get("total")
+    if type(consistent) is not int or type(total) is not int:
+        raise ValueError("stability summary must contain integer consistent and total values")
+
+    budget_payload = json.loads(budget_path.read_text(encoding="utf-8"))
+    if not isinstance(budget_payload, dict):
+        raise ValueError("budget preview must contain a JSON object")
+    startup = budget_payload.get("startup_required_micro_cny")
+    cap = budget_payload.get("cap_micro_cny")
+    paid_started = budget_payload.get("paid_execution_started")
+    if type(startup) is not int or type(cap) is not int or type(paid_started) is not bool:
+        raise ValueError("budget preview fields are missing or invalid")
+    if startup <= 0 or cap <= 0 or expected_cap_micro_cny <= 0:
+        raise ValueError("budget preview values must be positive")
+
+    return {
+        "retrieval": {
+            "evidence_sha256": _sha256(retrieval_path),
+            "actual": {
+                "candidate_source_hits": retrieval_checks["candidate_source_hits"]["actual"],
+                "final_top8_hits": retrieval_checks["final_top8_hits"]["actual"],
+            },
+            "required": {
+                "candidate_source_hits": retrieval_checks["candidate_source_hits"]["required"],
+                "final_top8_hits": retrieval_checks["final_top8_hits"]["required"],
+            },
+            "checks": retrieval_checks,
+            "passed": retrieval_checks["passed"],
+        },
+        "stability": {
+            "evidence_sha256": stability_evidence_sha256,
+            "actual": consistent,
+            "required": 17,
+            "total": total,
+            "required_total": 20,
+            "passed": total == 20 and consistent >= 17,
+        },
+        "budget": {
+            "evidence_sha256": _sha256(budget_path),
+            "actual": startup,
+            "required": expected_cap_micro_cny,
+            "cap_micro_cny": cap,
+            "paid_execution_started": paid_started,
+            "passed": (
+                cap == expected_cap_micro_cny
+                and startup <= cap
+                and paid_started is False
+            ),
+        },
+        "quality": {
+            "evidence_sha256": quality_evidence_sha256,
+            "actual": quality_macro_f1,
+            "required": 0.392,
+            "manifest_count": quality_manifest_count,
+            "provenance": "adaptive_full_manifest",
+            "passed": quality_manifest_count == 80 and quality_macro_f1 >= 0.392,
+        },
+    }
+
+
+def _stability_evidence_sha256(
+    plan: CampaignPlan, artifacts: dict[str, RunArtifact]
+) -> str:
+    stability_run_ids = {
+        item.run_id for item in plan.schedule if item.phase == "stability"
+    } | {link.dev_adaptive_run_id for link in plan.stability_repeat_zero_links}
+    payload = sorted(
+        (run_id, artifacts[run_id].artifact_sha256)
+        for run_id in stability_run_ids
+        if run_id in artifacts
+    )
+    return hashlib.sha256(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _quality_evidence(
+    artifacts: dict[str, RunArtifact],
+) -> tuple[str, int]:
+    payload = sorted(
+        (artifact.run_id, artifact.artifact_sha256)
+        for artifact in artifacts.values()
+        if artifact.phase == "dev"
+        and artifact.strategy is Strategy.ADAPTIVE
+        and artifact.repeat == 0
+    )
+    digest = hashlib.sha256(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return digest, len(payload)
+
+
+def _discover_experiment_dir(activity_dir: Path, repository_root: Path) -> Path | None:
+    resolved = Path(activity_dir).resolve()
+    repository_root = Path(repository_root).resolve()
+    for candidate in (resolved, resolved.parent):
+        if candidate == repository_root or not candidate.is_relative_to(repository_root):
+            continue
+        if (candidate / "experiment.json").is_file():
+            return candidate
+    return None
+
+
+def _parent_repeat_zero_artifacts(
+    identity: StabilityExperimentIdentity,
+    report_input: ReportInput,
+) -> dict[str, Path]:
+    parent_dir = report_input.parent_activity_dir
+    if parent_dir is None:
+        parent_dir = (
+            Path(report_input.repository_root)
+            / "artifacts"
+            / "evaluation"
+            / identity.parent_activity_id
+        )
+    parent_dir = Path(parent_dir)
+    payload = json.loads((parent_dir / "plan.json").read_text(encoding="utf-8"))
+    links = payload.get("stability_repeat_zero_links") if isinstance(payload, dict) else None
+    if not isinstance(links, list):
+        raise ValueError("parent campaign plan is missing repeat-zero links")
+    artifacts: dict[str, Path] = {}
+    for link in links:
+        if not isinstance(link, dict):
+            raise ValueError("parent repeat-zero link is invalid")
+        claim_id = link.get("claim_id")
+        run_id = link.get("dev_adaptive_run_id")
+        if not isinstance(claim_id, str) or not isinstance(run_id, str):
+            raise ValueError("parent repeat-zero link identity is invalid")
+        artifacts[claim_id] = parent_dir / "artifacts" / f"{run_id}.json"
+    return artifacts
+
+
+def _recovery_gate_identity_matches(
+    report_input: ReportInput,
+    *,
+    activity: ActivityRecord,
+    plan: CampaignPlan,
+    identity: StabilityExperimentIdentity,
+) -> bool:
+    assert report_input.retrieval_diagnostic is not None
+    assert report_input.retrieval_gold_manifest is not None
+    assert report_input.budget_preview is not None
+    retrieval = json.loads(
+        Path(report_input.retrieval_diagnostic).read_text(encoding="utf-8")
+    )
+    budget = json.loads(Path(report_input.budget_preview).read_text(encoding="utf-8"))
+    retrieval_identity = retrieval.get("identity") if isinstance(retrieval, dict) else None
+    if not isinstance(retrieval_identity, dict) or not isinstance(budget, dict):
+        return False
+    expected_retrieval = {
+        "runtime_manifest_sha256": _sha256(
+            _evidence_path(
+                report_input.calibration_runtime_manifest,
+                Path(report_input.repository_root)
+                / "data/manifests/averitec_calibration_runtime.json",
+            )
+        ),
+        "gold_manifest_sha256": _sha256(report_input.retrieval_gold_manifest),
+        "config_sha256": identity.config_sha256,
+        "corpus_receipt_sha256": _sha256(
+            _evidence_path(
+                report_input.corpus_preparation_receipt,
+                Path(report_input.repository_root)
+                / "data/processed/averitec/preparation_receipt.json",
+            )
+        ),
+        "retrieval_mode": "source_hybrid_v2",
+        "ablation": "default",
+    }
+    config_path = _evidence_path(
+        report_input.calibrated_config,
+        Path(report_input.repository_root) / "configs/calibrated.yaml",
+    )
+    pricing_path = _evidence_path(
+        report_input.pricing,
+        Path(report_input.repository_root) / "configs/pricing.local.yaml",
+    )
+    raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw_config, dict):
+        return False
+    expected_preview = build_campaign_budget_preview(
+        generation=GenerationSettings.model_validate(raw_config.get("generation", {})),
+        hardening=HardeningSettings.model_validate(raw_config.get("hardening", {})),
+        budget=BudgetSettings.model_validate(raw_config.get("budget", {})),
+        pricing=load_price_config(pricing_path),
+    )
+    if expected_preview["cap_micro_cny"] != plan.cap_micro_cny:
+        return False
+    expected_budget = {
+        "activity_id": activity.activity_id,
+        "campaign_id": plan.campaign_id,
+        "config_sha256": identity.config_sha256,
+        "pricing_sha256": plan.freeze.pricing_sha256,
+        "cap_micro_cny": plan.cap_micro_cny,
+        "startup_required_micro_cny": expected_preview[
+            "startup_required_micro_cny"
+        ],
+        "paid_execution_started": expected_preview["paid_execution_started"],
+    }
+    return all(
+        retrieval_identity.get(key) == value
+        for key, value in expected_retrieval.items()
+    ) and all(budget.get(key) == value for key, value in expected_budget.items())
+
+
+def _audit_recovery_gold(
+    report_input: ReportInput,
+    *,
+    plan: CampaignPlan,
+) -> list[str]:
+    assert report_input.retrieval_gold_manifest is not None
+    repository_root = Path(report_input.repository_root).resolve()
+    gold_path = Path(report_input.retrieval_gold_manifest).resolve()
+    relative = "data/scorer_manifests/averitec_calibration_gold.json"
+    expected_path = (repository_root / relative).resolve()
+    if gold_path != expected_path:
+        return ["retrieval_gold_manifest_untrusted"]
+    runtime_path = _evidence_path(
+        report_input.calibration_runtime_manifest,
+        repository_root / "data/manifests/averitec_calibration_runtime.json",
+    )
+    try:
+        runtime = load_runtime_manifest(runtime_path, allowed_root=runtime_path.parent)
+        gold = load_gold_manifest(gold_path, allowed_root=gold_path.parent)
+        align_runtime_and_gold(runtime, gold)
+    except (OSError, UnicodeError, ValueError):
+        return ["retrieval_gold_manifest_invalid"]
+    if report_input.require_git:
+        reasons = _audit_scorer_manifest(
+            repository_root,
+            gold_path,
+            dev_protocol_git_sha=plan.freeze.dev_protocol_git_sha,
+            relative=relative,
+        )
+        if reasons:
+            return ["retrieval_gold_manifest_git_blob_mismatch"]
+    return []
+
+
+def _recovery_report_evidence(
+    report_input: ReportInput,
+    *,
+    activity: ActivityRecord,
+    plan: CampaignPlan,
+    state: CampaignState,
+    artifacts: dict[str, RunArtifact],
+    stability: dict[str, object],
+    quality_macro_f1: float,
+) -> tuple[
+    StabilityExperimentIdentity | None,
+    dict[str, dict[str, object]],
+    list[str],
+]:
+    experiment_dir = report_input.experiment_dir or _discover_experiment_dir(
+        report_input.activity_dir,
+        report_input.repository_root,
+    )
+    values = (
+        experiment_dir,
+        report_input.parent_report,
+        report_input.parent_config,
+        report_input.retrieval_gold_manifest,
+        report_input.retrieval_diagnostic,
+        report_input.budget_preview,
+    )
+    if not any(value is not None for value in values):
+        return None, {}, []
+    if not all(value is not None for value in values):
+        return None, {}, ["recovery_evidence_incomplete"]
+
+    assert experiment_dir is not None
+    assert report_input.parent_report is not None
+    assert report_input.parent_config is not None
+    assert report_input.retrieval_diagnostic is not None
+    assert report_input.budget_preview is not None
+    try:
+        identity = load_experiment_identity(experiment_dir)
+        if identity.activity_id != activity.activity_id or identity.campaign_id != plan.campaign_id:
+            raise ValueError("experiment identity differs from report activity")
+        validate_parent_baseline(
+            identity,
+            parent_report=report_input.parent_report,
+            parent_manifest=_evidence_path(
+                report_input.runtime_manifest,
+                Path(report_input.repository_root)
+                / "data/manifests/averitec_dev_runtime.json",
+            ),
+            pricing=_evidence_path(
+                report_input.pricing,
+                Path(report_input.repository_root) / "configs/pricing.local.yaml",
+            ),
+            parent_config=report_input.parent_config,
+            config=_evidence_path(
+                report_input.calibrated_config,
+                Path(report_input.repository_root) / "configs/calibrated.yaml",
+            ),
+            prompt=_evidence_path(
+                report_input.prompt_bundle,
+                Path(report_input.repository_root) / "src/evidence_route/prompts.py",
+            ),
+            stability_manifest=_evidence_path(
+                report_input.stability_runtime_manifest,
+                Path(report_input.repository_root)
+                / "data/manifests/averitec_stability_runtime.json",
+            ),
+        )
+    except (OSError, UnicodeError, ValueError):
+        return None, {}, ["parent_baseline_invalid"]
+    try:
+        verify_repeat_zero_reuse(
+            identity,
+            _parent_repeat_zero_artifacts(identity, report_input),
+        )
+    except (OSError, UnicodeError, ValueError):
+        return identity, {}, ["parent_artifact_hashes_mismatch"]
+
+    gold_reasons = _audit_recovery_gold(report_input, plan=plan)
+    if gold_reasons:
+        return identity, {}, gold_reasons
+
+    try:
+        if not _recovery_gate_identity_matches(
+            report_input,
+            activity=activity,
+            plan=plan,
+            identity=identity,
+        ):
+            return identity, {}, ["offline_gate_identity_mismatch"]
+        quality_evidence_sha256, quality_manifest_count = _quality_evidence(artifacts)
+        gates = evaluate_recovery_gates(
+            retrieval_diagnostic=report_input.retrieval_diagnostic,
+            budget_preview=report_input.budget_preview,
+            stability=stability,
+            stability_evidence_sha256=_stability_evidence_sha256(plan, artifacts),
+            quality_macro_f1=quality_macro_f1,
+            quality_evidence_sha256=quality_evidence_sha256,
+            quality_manifest_count=quality_manifest_count,
+            expected_cap_micro_cny=plan.cap_micro_cny,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return identity, {}, ["offline_gate_evidence_invalid"]
+    reasons = [
+        f"offline_{name}_gate_failed"
+        for name, values in gates.items()
+        if values["passed"] is not True
+    ]
+    return identity, gates, reasons
+
+
 def _is_sha256(value: object) -> bool:
     return (
         isinstance(value, str)
@@ -271,12 +660,12 @@ def _audit_scorer_manifest(
     path: Path,
     *,
     dev_protocol_git_sha: str,
+    relative: str = "data/scorer_manifests/averitec_dev_gold.json",
 ) -> list[str]:
     """Require the evaluator manifest to be the frozen repository blob."""
 
     repository_root = Path(repository_root).resolve()
     path = Path(path).resolve()
-    relative = "data/scorer_manifests/averitec_dev_gold.json"
     if not _trusted_repository_path(repository_root, path, relative) or not path.is_file():
         return ["scorer_manifest_path_untrusted"]
     try:
@@ -1590,6 +1979,24 @@ def _render_markdown(summary: dict[str, object]) -> str:
             f"| {name} | {values['full_manifest_macro_f1']:.3f} | "
             f"{values['full_manifest_accuracy']:.3f} | {values['completion_rate']:.1%} |"
         )
+    offline_gates = summary.get("offline_gates")
+    if isinstance(offline_gates, dict) and offline_gates:
+        lines.extend(
+            [
+                "",
+                "## Offline Recovery Gates",
+                "",
+                "| Gate | Actual | Required | Passed | Evidence SHA-256 |",
+                "|---|---|---|---:|---|",
+            ]
+        )
+        for name in ("retrieval", "stability", "budget", "quality"):
+            values = offline_gates[name]
+            lines.append(
+                f"| {name} | {json.dumps(values['actual'], sort_keys=True)} | "
+                f"{json.dumps(values['required'], sort_keys=True)} | "
+                f"{str(values['passed']).lower()} | {values['evidence_sha256']} |"
+            )
     lines.extend(
         [
             "",
@@ -1770,6 +2177,20 @@ def build_report_bundle(
         state_path,
         artifacts,
     )
+    experiment_identity, offline_gates, recovery_reasons = _recovery_report_evidence(
+        report_input,
+        activity=activity,
+        plan=plan,
+        state=state,
+        artifacts=artifacts,
+        stability=stability,
+        quality_macro_f1=float(adaptive["full_manifest_macro_f1"]),
+    )
+    if recovery_reasons:
+        gate = PublicationGateResult(
+            publishable=False,
+            reasons=list(dict.fromkeys([*gate.reasons, *recovery_reasons])),
+        )
     official = _official_summary(
         report_input,
         gold_manifest,
@@ -1785,6 +2206,35 @@ def build_report_bundle(
             publishable=False,
             reasons=[*gate.reasons, "official_evaluator_unavailable"],
         )
+    reproducibility: dict[str, object] = {
+        "activity_id": activity.activity_id,
+        "campaign_id": plan.campaign_id,
+        "campaign_fingerprint": plan.campaign_fingerprint,
+        "manifest_freeze_git_sha": plan.freeze.manifest_freeze_git_sha,
+        "dev_protocol_git_sha": plan.freeze.dev_protocol_git_sha,
+        "calibration_runtime_manifest_sha256": plan.freeze.calibration_runtime_manifest_sha256,
+        "dev_runtime_manifest_sha256": plan.freeze.dev_runtime_manifest_sha256,
+        "stability_runtime_manifest_sha256": plan.freeze.stability_runtime_manifest_sha256,
+        "corpus_preparation_receipt_sha256": plan.freeze.corpus_preparation_receipt_sha256,
+        "prompt_bundle_sha256": plan.freeze.prompt_bundle_sha256,
+        "config_sha256": plan.freeze.config_sha256,
+        "pricing_sha256": plan.freeze.pricing_sha256,
+        "endpoint_config_sha256": plan.freeze.endpoint_config_sha256,
+        "requirements_lock_sha256": plan.freeze.requirements_lock_sha256,
+        "seed": plan.freeze.seed,
+        "requested_alias": plan.freeze.requested_alias,
+        "relay_reported_model_ids_raw": activity.observed_response_model_ids_raw,
+        "model_identity": IDENTITY_DESCRIPTION,
+    }
+    if experiment_identity is not None:
+        reproducibility.update(
+            {
+                "experiment_id": experiment_identity.experiment_id,
+                "parent_activity_id": experiment_identity.parent_activity_id,
+                "parent_report_sha256": experiment_identity.parent_report_sha256,
+                "parent_config_sha256": experiment_identity.parent_config_sha256,
+            }
+        )
     summary: dict[str, object] = {
         "benchmark_name": BENCHMARK_NAME,
         "publishable": gate.publishable,
@@ -1797,27 +2247,9 @@ def build_report_bundle(
         "strategies": strategy_payloads,
         "paired_bootstrap": paired,
         "stability": stability,
+        "offline_gates": offline_gates,
         "official": official,
-        "reproducibility": {
-            "activity_id": activity.activity_id,
-            "campaign_id": plan.campaign_id,
-            "campaign_fingerprint": plan.campaign_fingerprint,
-            "manifest_freeze_git_sha": plan.freeze.manifest_freeze_git_sha,
-            "dev_protocol_git_sha": plan.freeze.dev_protocol_git_sha,
-            "calibration_runtime_manifest_sha256": plan.freeze.calibration_runtime_manifest_sha256,
-            "dev_runtime_manifest_sha256": plan.freeze.dev_runtime_manifest_sha256,
-            "stability_runtime_manifest_sha256": plan.freeze.stability_runtime_manifest_sha256,
-            "corpus_preparation_receipt_sha256": plan.freeze.corpus_preparation_receipt_sha256,
-            "prompt_bundle_sha256": plan.freeze.prompt_bundle_sha256,
-            "config_sha256": plan.freeze.config_sha256,
-            "pricing_sha256": plan.freeze.pricing_sha256,
-            "endpoint_config_sha256": plan.freeze.endpoint_config_sha256,
-            "requirements_lock_sha256": plan.freeze.requirements_lock_sha256,
-            "seed": plan.freeze.seed,
-            "requested_alias": plan.freeze.requested_alias,
-            "relay_reported_model_ids_raw": activity.observed_response_model_ids_raw,
-            "model_identity": IDENTITY_DESCRIPTION,
-        },
+        "reproducibility": reproducibility,
         "publication_gate": gate.model_dump(mode="json"),
         "limitations": [
             "Balanced frozen subset; not the full AVeriTeC benchmark or leaderboard.",
@@ -1848,4 +2280,5 @@ __all__ = [
     "ReportBundle",
     "ReportInput",
     "build_report_bundle",
+    "evaluate_recovery_gates",
 ]

@@ -17,6 +17,7 @@ from evidence_route.evaluation.activity import (
     summarize_run_artifacts,
 )
 from evidence_route.evaluation.calibration import runtime_case_fingerprint, state_fingerprint
+from evidence_route.evaluation.experiment import create_experiment_identity
 from evidence_route.evaluation.lifecycle import persist_activity, sha256_file
 from evidence_route.evaluation.reporting import (
     PublicationBlocked,
@@ -27,6 +28,465 @@ from evidence_route.evaluation.stability import StabilityCategory
 from evidence_route.llm import make_call_id
 
 pytest_plugins = ["tests.fixtures.evaluation.report_factory"]
+
+
+def _write_recovery_gate_inputs(
+    tmp_path: Path, *, retrieval_passed: bool = True
+) -> tuple[Path, Path]:
+    records = [
+        {
+            "claim_id": "train-2468" if index == 0 else f"train-{3000 + index}",
+            "candidate_count": 1,
+            "source_hit": index < (22 if retrieval_passed else 21),
+            "final_hit": index < 14,
+        }
+        for index in range(32)
+    ]
+    retrieval = tmp_path / "retrieval-diagnostic.json"
+    atomic_write_json(
+        retrieval,
+        {
+            "summary": {
+                "claim_count": 32,
+                "source_hits": 22 if retrieval_passed else 21,
+                "final_hits": 14,
+                "candidate_count": 32,
+            },
+            "records": records,
+        },
+    )
+    budget = tmp_path / "budget-preview.json"
+    atomic_write_json(
+        budget,
+        {
+            "startup_required_micro_cny": 100,
+            "cap_micro_cny": 200,
+            "paid_execution_started": False,
+        },
+    )
+    return retrieval, budget
+
+
+def test_recovery_gates_record_hashed_evidence_and_recompute_retrieval(tmp_path: Path) -> None:
+    retrieval, budget = _write_recovery_gate_inputs(tmp_path)
+
+    gates = reporting.evaluate_recovery_gates(
+        retrieval_diagnostic=retrieval,
+        budget_preview=budget,
+        stability={"consistent": 17, "total": 20},
+        stability_evidence_sha256="a" * 64,
+        quality_macro_f1=0.392,
+        quality_evidence_sha256="c" * 64,
+        quality_manifest_count=80,
+        expected_cap_micro_cny=200,
+    )
+
+    assert gates["retrieval"]["passed"] is True
+    assert gates["retrieval"]["evidence_sha256"] == sha256_file(retrieval)
+    assert gates["stability"]["actual"] == 17
+    assert gates["stability"]["required"] == 17
+    assert gates["stability"]["passed"] is True
+    assert gates["budget"]["evidence_sha256"] == sha256_file(budget)
+    assert gates["budget"]["passed"] is True
+    assert gates["quality"]["actual"] >= 0.392
+    assert gates["quality"]["required"] == 0.392
+    assert gates["quality"]["evidence_sha256"]
+
+
+def test_recovery_gates_fail_below_strict_stability_threshold(tmp_path: Path) -> None:
+    retrieval, budget = _write_recovery_gate_inputs(tmp_path)
+
+    gates = reporting.evaluate_recovery_gates(
+        retrieval_diagnostic=retrieval,
+        budget_preview=budget,
+        stability={"consistent": 16, "total": 20},
+        stability_evidence_sha256="b" * 64,
+        quality_macro_f1=0.392,
+        quality_evidence_sha256="c" * 64,
+        quality_manifest_count=80,
+        expected_cap_micro_cny=200,
+    )
+
+    assert gates["stability"]["passed"] is False
+
+
+def _recovery_report_input(report_input, tmp_path: Path, *, retrieval_passed: bool = True):
+    retrieval, budget = _write_recovery_gate_inputs(
+        tmp_path, retrieval_passed=retrieval_passed
+    )
+    parent_dir = tmp_path / "parent"
+    parent_dir.mkdir()
+    parent_report = parent_dir / "parent-report.json"
+    parent_config = parent_dir / "parent-config.yaml"
+    parent_config.write_bytes(report_input.calibrated_config.read_bytes())
+    atomic_write_json(
+        parent_report,
+        {
+            "reproducibility": {
+                "activity_id": "parent-gate-a",
+                "campaign_id": "parent-gate-a-dev",
+                "prompt_bundle_sha256": sha256_file(report_input.prompt_bundle),
+            }
+        },
+    )
+    plan = json.loads((report_input.activity_dir / "plan.json").read_text(encoding="utf-8"))
+    activity = json.loads(
+        (report_input.activity_dir / "activity.json").read_text(encoding="utf-8")
+    )
+    state = json.loads(
+        (report_input.activity_dir / "campaign.json").read_text(encoding="utf-8")
+    )
+    experiment_dir = tmp_path
+    parent_activity_dir = tmp_path / "parent-activity"
+    parent_artifacts = parent_activity_dir / "artifacts"
+    parent_artifacts.mkdir(parents=True)
+    atomic_write_json(
+        parent_activity_dir / "plan.json",
+        {"stability_repeat_zero_links": plan["stability_repeat_zero_links"]},
+    )
+    for link in plan["stability_repeat_zero_links"]:
+        run_id = link["dev_adaptive_run_id"]
+        source = report_input.activity_dir / "artifacts" / f"{run_id}.json"
+        (parent_artifacts / f"{run_id}.json").write_bytes(source.read_bytes())
+    create_experiment_identity(
+        experiment_id=activity["activity_id"],
+        activity_id=activity["activity_id"],
+        campaign_id=plan["campaign_id"],
+        parent_activity_id="parent-gate-a",
+        parent_report=parent_report,
+        parent_manifest=report_input.runtime_manifest,
+        pricing=report_input.pricing,
+        parent_config=parent_config,
+        config=report_input.calibrated_config,
+        prompt=report_input.prompt_bundle,
+        stability_manifest=report_input.stability_runtime_manifest,
+        repeat_schedule={
+            link["claim_id"]: [0, 1, 2]
+            for link in plan["stability_repeat_zero_links"]
+        },
+        requested_alias=activity["summary"]["requested_aliases"][0],
+        response_model_id=activity["observed_response_model_ids_raw"][0],
+        identity_verified=False,
+        output_dir=experiment_dir,
+        repeat_zero_artifact_sha256s=state["stability_repeat_zero_artifact_sha256s"],
+    )
+    calibration_runtime = json.loads(
+        report_input.calibration_runtime_manifest.read_text(encoding="utf-8")
+    )
+    retrieval_gold_manifest = (
+        report_input.repository_root
+        / "data/scorer_manifests/averitec_calibration_gold.json"
+    )
+    atomic_write_json(
+        retrieval_gold_manifest,
+        {
+            "schema_version": "1",
+            "dataset": calibration_runtime["dataset"],
+            "revision": calibration_runtime["revision"],
+            "source_metadata_sha256": calibration_runtime["source_metadata_sha256"],
+            "runtime_manifest_sha256": sha256_file(
+                report_input.calibration_runtime_manifest
+            ),
+            "seed": calibration_runtime["seed"],
+            "items": [
+                {
+                    "claim_id": item["claim_id"],
+                    "original_id": item["original_id"],
+                    "claim": item["claim"],
+                    "label": "Supported",
+                    "questions": [],
+                    "justification": "fixture",
+                    "claim_types": [],
+                }
+                for item in calibration_runtime["items"]
+            ],
+        },
+    )
+    retrieval_gold_manifest.with_suffix(".json.sha256").write_text(
+        sha256_file(retrieval_gold_manifest) + "\n", encoding="ascii"
+    )
+    retrieval_payload = json.loads(retrieval.read_text(encoding="utf-8"))
+    retrieval_payload["identity"] = {
+        "runtime_manifest_sha256": sha256_file(report_input.calibration_runtime_manifest),
+        "gold_manifest_sha256": sha256_file(retrieval_gold_manifest),
+        "config_sha256": sha256_file(report_input.calibrated_config),
+        "corpus_receipt_sha256": sha256_file(report_input.corpus_preparation_receipt),
+        "retrieval_mode": "source_hybrid_v2",
+        "ablation": "default",
+    }
+    atomic_write_json(retrieval, retrieval_payload)
+    budget_payload = json.loads(budget.read_text(encoding="utf-8"))
+    budget_payload.update(
+        {
+            "startup_required_micro_cny": 10_702_560,
+            "activity_id": activity["activity_id"],
+            "campaign_id": plan["campaign_id"],
+            "config_sha256": sha256_file(report_input.calibrated_config),
+            "pricing_sha256": sha256_file(report_input.pricing),
+            "cap_micro_cny": plan["cap_micro_cny"],
+        }
+    )
+    atomic_write_json(budget, budget_payload)
+    return replace(
+        report_input,
+        experiment_dir=experiment_dir,
+        parent_activity_dir=parent_activity_dir,
+        parent_report=parent_report,
+        parent_config=parent_config,
+        retrieval_gold_manifest=retrieval_gold_manifest,
+        retrieval_diagnostic=retrieval,
+        budget_preview=budget,
+    )
+
+
+def test_recovery_report_includes_parent_hashes_and_offline_gates(
+    complete_report_input, tmp_path: Path
+) -> None:
+    report_input = _recovery_report_input(complete_report_input, tmp_path)
+
+    bundle = build_report_bundle(report_input)
+
+    assert all(gate["passed"] for gate in bundle.summary["offline_gates"].values())
+    assert bundle.summary["reproducibility"]["parent_report_sha256"] == sha256_file(
+        report_input.parent_report
+    )
+    assert bundle.summary["reproducibility"]["parent_config_sha256"] == sha256_file(
+        report_input.parent_config
+    )
+    assert "## Offline Recovery Gates" in bundle.markdown
+
+
+def test_recovery_report_blocks_failed_retrieval_gate(
+    complete_report_input, tmp_path: Path
+) -> None:
+    report_input = _recovery_report_input(
+        complete_report_input, tmp_path, retrieval_passed=False
+    )
+
+    bundle = build_report_bundle(report_input)
+
+    assert bundle.publication_gate.publishable is False
+    assert "offline_retrieval_gate_failed" in bundle.publication_gate.reasons
+    assert bundle.resume_snippet is None
+
+
+def test_recovery_report_blocks_changed_parent_config(
+    complete_report_input, tmp_path: Path
+) -> None:
+    report_input = _recovery_report_input(complete_report_input, tmp_path)
+    report_input.parent_config.write_text("changed: true\n", encoding="utf-8")
+
+    bundle = build_report_bundle(report_input)
+
+    assert bundle.publication_gate.publishable is False
+    assert "parent_baseline_invalid" in bundle.publication_gate.reasons
+
+
+def test_recovery_report_blocks_changed_parent_artifact_bytes(
+    complete_report_input, tmp_path: Path
+) -> None:
+    report_input = _recovery_report_input(complete_report_input, tmp_path)
+    parent_plan = json.loads(
+        (report_input.parent_activity_dir / "plan.json").read_text(encoding="utf-8")
+    )
+    run_id = parent_plan["stability_repeat_zero_links"][0]["dev_adaptive_run_id"]
+    artifact_path = report_input.parent_activity_dir / "artifacts" / f"{run_id}.json"
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact["result"]["rationale"] = "tampered parent artifact"
+    atomic_write_json(artifact_path, artifact)
+
+    bundle = build_report_bundle(report_input)
+
+    assert bundle.publication_gate.publishable is False
+    assert "parent_artifact_hashes_mismatch" in bundle.publication_gate.reasons
+
+
+def test_recovery_report_requires_gate_args_when_experiment_file_is_discovered(
+    complete_report_input, tmp_path: Path
+) -> None:
+    report_input = _recovery_report_input(complete_report_input, tmp_path)
+    (report_input.activity_dir / "experiment.json").write_bytes(
+        (report_input.experiment_dir / "experiment.json").read_bytes()
+    )
+    report_input = replace(
+        report_input,
+        experiment_dir=None,
+        parent_activity_dir=None,
+        parent_report=None,
+        parent_config=None,
+        retrieval_gold_manifest=None,
+        retrieval_diagnostic=None,
+        budget_preview=None,
+    )
+
+    bundle = build_report_bundle(report_input)
+
+    assert bundle.publication_gate.publishable is False
+    assert "recovery_evidence_incomplete" in bundle.publication_gate.reasons
+
+
+def test_recovery_report_binds_retrieval_and_budget_to_experiment_identity(
+    complete_report_input, tmp_path: Path
+) -> None:
+    report_input = _recovery_report_input(complete_report_input, tmp_path)
+    retrieval = json.loads(report_input.retrieval_diagnostic.read_text(encoding="utf-8"))
+    retrieval["identity"]["config_sha256"] = "0" * 64
+    atomic_write_json(report_input.retrieval_diagnostic, retrieval)
+
+    bundle = build_report_bundle(report_input)
+
+    assert bundle.publication_gate.publishable is False
+    assert "offline_gate_identity_mismatch" in bundle.publication_gate.reasons
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("retrieval_mode", "sentence_bm25_v1"), ("ablation", "source-only")],
+)
+def test_recovery_report_rejects_alternate_retrieval_identity(
+    complete_report_input, tmp_path: Path, field: str, value: str
+) -> None:
+    report_input = _recovery_report_input(complete_report_input, tmp_path)
+    retrieval = json.loads(report_input.retrieval_diagnostic.read_text(encoding="utf-8"))
+    retrieval["identity"][field] = value
+    atomic_write_json(report_input.retrieval_diagnostic, retrieval)
+
+    bundle = build_report_bundle(report_input)
+
+    assert bundle.publication_gate.publishable is False
+    assert "offline_gate_identity_mismatch" in bundle.publication_gate.reasons
+
+
+def test_recovery_report_rejects_identity_free_retrieval_evidence(
+    complete_report_input, tmp_path: Path
+) -> None:
+    report_input = _recovery_report_input(complete_report_input, tmp_path)
+    retrieval = json.loads(report_input.retrieval_diagnostic.read_text(encoding="utf-8"))
+    retrieval.pop("identity")
+    atomic_write_json(report_input.retrieval_diagnostic, retrieval)
+
+    bundle = build_report_bundle(report_input)
+
+    assert bundle.publication_gate.publishable is False
+    assert "offline_gate_identity_mismatch" in bundle.publication_gate.reasons
+
+
+def test_recovery_report_rejects_budget_from_another_campaign(
+    complete_report_input, tmp_path: Path
+) -> None:
+    report_input = _recovery_report_input(complete_report_input, tmp_path)
+    budget = json.loads(report_input.budget_preview.read_text(encoding="utf-8"))
+    budget["campaign_id"] = "another-campaign"
+    atomic_write_json(report_input.budget_preview, budget)
+
+    bundle = build_report_bundle(report_input)
+
+    assert bundle.publication_gate.publishable is False
+    assert "offline_gate_identity_mismatch" in bundle.publication_gate.reasons
+
+
+def test_recovery_report_rejects_budget_cap_different_from_campaign_plan(
+    complete_report_input, tmp_path: Path
+) -> None:
+    report_input = _recovery_report_input(complete_report_input, tmp_path)
+    budget = json.loads(report_input.budget_preview.read_text(encoding="utf-8"))
+    budget["cap_micro_cny"] += 1
+    atomic_write_json(report_input.budget_preview, budget)
+
+    bundle = build_report_bundle(report_input)
+
+    assert bundle.publication_gate.publishable is False
+    assert "offline_gate_identity_mismatch" in bundle.publication_gate.reasons
+
+
+def test_recovery_report_rejects_altered_budget_startup(
+    complete_report_input, tmp_path: Path
+) -> None:
+    report_input = _recovery_report_input(complete_report_input, tmp_path)
+    budget = json.loads(report_input.budget_preview.read_text(encoding="utf-8"))
+    budget["startup_required_micro_cny"] = 1
+    atomic_write_json(report_input.budget_preview, budget)
+
+    bundle = build_report_bundle(report_input)
+
+    assert bundle.publication_gate.publishable is False
+    assert "offline_gate_identity_mismatch" in bundle.publication_gate.reasons
+
+
+def test_recovery_report_rejects_substituted_external_gold_and_diagnostic(
+    complete_report_input, tmp_path: Path
+) -> None:
+    report_input = _recovery_report_input(complete_report_input, tmp_path)
+    external_gold = tmp_path / "external-calibration-gold.json"
+    external_gold.write_bytes(report_input.retrieval_gold_manifest.read_bytes())
+    external_gold.with_suffix(".json.sha256").write_text(
+        sha256_file(external_gold) + "\n", encoding="ascii"
+    )
+    retrieval = json.loads(report_input.retrieval_diagnostic.read_text(encoding="utf-8"))
+    retrieval["identity"]["gold_manifest_sha256"] = sha256_file(external_gold)
+    atomic_write_json(report_input.retrieval_diagnostic, retrieval)
+
+    bundle = build_report_bundle(
+        replace(report_input, retrieval_gold_manifest=external_gold)
+    )
+
+    assert bundle.publication_gate.publishable is False
+    assert "retrieval_gold_manifest_untrusted" in bundle.publication_gate.reasons
+
+
+def test_repository_root_experiment_file_does_not_poison_historical_report(
+    complete_report_input,
+) -> None:
+    atomic_write_json(complete_report_input.repository_root / "experiment.json", {})
+
+    bundle = build_report_bundle(complete_report_input)
+
+    assert "recovery_evidence_incomplete" not in bundle.publication_gate.reasons
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("startup_required_micro_cny", 0), ("cap_micro_cny", 0)],
+)
+def test_recovery_gates_reject_nonpositive_budget_values(
+    tmp_path: Path, field: str, value: int
+) -> None:
+    retrieval, budget_path = _write_recovery_gate_inputs(tmp_path)
+    budget = json.loads(budget_path.read_text(encoding="utf-8"))
+    budget[field] = value
+    atomic_write_json(budget_path, budget)
+
+    with pytest.raises(ValueError, match="positive"):
+        reporting.evaluate_recovery_gates(
+            retrieval_diagnostic=retrieval,
+            budget_preview=budget_path,
+            stability={"consistent": 17, "total": 20},
+            stability_evidence_sha256="a" * 64,
+            quality_macro_f1=0.392,
+            quality_evidence_sha256="c" * 64,
+            quality_manifest_count=80,
+            expected_cap_micro_cny=200,
+        )
+
+
+def test_recovery_report_blocks_full_manifest_macro_f1_below_gate_a(
+    complete_report_input, tmp_path: Path, monkeypatch
+) -> None:
+    report_input = _recovery_report_input(complete_report_input, tmp_path)
+    original = reporting._strategy_summary
+
+    def below_baseline(*args, **kwargs):
+        payload, predictions = original(*args, **kwargs)
+        if args[0].value == "adaptive":
+            payload = {**payload, "full_manifest_macro_f1": 0.391}
+        return payload, predictions
+
+    monkeypatch.setattr(reporting, "_strategy_summary", below_baseline)
+
+    bundle = build_report_bundle(report_input)
+
+    assert bundle.publication_gate.publishable is False
+    assert "offline_quality_gate_failed" in bundle.publication_gate.reasons
 
 
 def _rewrite_campaign_as_zero_call_failures(report_input) -> None:
