@@ -28,6 +28,7 @@ class RetrievalCandidate:
     source_key: str
     lexical_score: float
     source_rank: int
+    acquisition_rank: int
 
 
 @dataclass(frozen=True)
@@ -57,8 +58,12 @@ def source_candidates(
         raise ValueError("candidate limits must be positive")
     scores = index.bm25.get_scores(tokenize(query))
     by_source: dict[str, list[tuple[FrozenEvidenceRecord, float]]] = defaultdict(list)
+    acquisition_ranks: dict[str, int] = {}
     for record, score in zip(index.records, scores, strict=True):
-        by_source[canonicalize_citation_url(record.source_url)].append((record, float(score)))
+        canonical_url = canonicalize_citation_url(record.source_url)
+        if canonical_url not in acquisition_ranks:
+            acquisition_ranks[canonical_url] = len(acquisition_ranks)
+        by_source[canonical_url].append((record, float(score)))
 
     def sentence_key(item: tuple[FrozenEvidenceRecord, float]) -> tuple[float, str, str, str]:
         record, score = item
@@ -93,7 +98,13 @@ def source_candidates(
                 continue
             record, score = rows[passage_rank]
             candidates.append(
-                RetrievalCandidate(record, canonical_url, score, source_rank)
+                RetrievalCandidate(
+                    record,
+                    canonical_url,
+                    score,
+                    source_rank,
+                    acquisition_ranks[canonical_url],
+                )
             )
             if len(candidates) >= dense_candidate_k:
                 return candidates
@@ -132,6 +143,7 @@ def fuse_candidates(
     lexical_weight: float,
     source_weight: float,
     dense_weight: float,
+    acquisition_weight: float,
     top_k: int,
     final_per_source: int,
 ) -> list[tuple[RetrievalCandidate, float]]:
@@ -139,7 +151,7 @@ def fuse_candidates(
         raise ValueError("dense score count must match candidates")
     if top_k < 1 or final_per_source < 1:
         raise ValueError("ranking limits must be positive")
-    weights = (lexical_weight, source_weight, dense_weight)
+    weights = (lexical_weight, source_weight, dense_weight, acquisition_weight)
     if any(weight < 0 or not math.isfinite(weight) for weight in weights):
         raise ValueError("ranking weights must be finite and non-negative")
     if not math.isclose(sum(weights), 1.0):
@@ -148,13 +160,15 @@ def fuse_candidates(
         raise ValueError("dense scores must be finite")
     lexical = _min_max([item.lexical_score for item in candidates])
     source = _min_max([-float(item.source_rank) for item in candidates])
+    acquisition = [1.0 / (1.0 + item.acquisition_rank) for item in candidates]
     ranked = sorted(
-        zip(candidates, lexical, source, dense_scores, strict=True),
+        zip(candidates, lexical, source, dense_scores, acquisition, strict=True),
         key=lambda item: (
             -(
                 lexical_weight * item[1]
                 + source_weight * item[2]
                 + dense_weight * float(item[3])
+                + acquisition_weight * item[4]
             ),
             item[0].source_rank,
             item[0].record.evidence_id,
@@ -169,6 +183,7 @@ def fuse_candidates(
                 item[1] * lexical_weight
                 + item[2] * source_weight
                 + item[3] * dense_weight
+                + item[4] * acquisition_weight
             ),
         )
         for item in ranked
@@ -212,6 +227,7 @@ def trace_hybrid_retrieval(
             lexical_weight=float(settings["lexical_weight"]),
             source_weight=float(settings["source_weight"]),
             dense_weight=float(settings["dense_weight"]),
+            acquisition_weight=float(settings.get("acquisition_weight", 0.0)),
             top_k=top_k,
             final_per_source=int(settings.get("final_per_source", max_per_source or top_k)),
         )

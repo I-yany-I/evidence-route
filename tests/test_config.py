@@ -152,7 +152,10 @@ def test_evidence_source_cap_is_optional_and_configurable(
 
 
 def test_default_evidence_settings_preserve_sentence_bm25_v1() -> None:
-    assert EvidenceSettings().retrieval_mode == "sentence_bm25_v1"
+    settings = EvidenceSettings()
+
+    assert settings.retrieval_mode == "sentence_bm25_v1"
+    assert "acquisition_weight" not in settings.model_dump(mode="json")
 
 
 def test_hybrid_retrieval_requires_complete_model_identity() -> None:
@@ -172,10 +175,26 @@ def test_hybrid_retrieval_accepts_bounded_complete_settings() -> None:
         dense_model_receipt_sha256="a" * 64,
         lexical_weight=0.2,
         source_weight=0.1,
-        dense_weight=0.7,
+        dense_weight=0.4,
+        acquisition_weight=0.3,
     )
 
     assert settings.source_candidate_k * settings.passages_per_source == 256
+    assert settings.acquisition_weight == 0.3
+
+
+def test_hybrid_retrieval_rejects_four_weight_sum_mismatch() -> None:
+    with pytest.raises(ValidationError, match="retrieval weights"):
+        EvidenceSettings(
+            retrieval_mode="source_hybrid_v2",
+            dense_model_id="BAAI/bge-small-en-v1.5",
+            dense_model_revision="52398278842ec682c6f32300af41344b1c0b0bb2",
+            dense_model_receipt_sha256="a" * 64,
+            lexical_weight=0.2,
+            source_weight=0.1,
+            dense_weight=0.7,
+            acquisition_weight=0.3,
+        )
 
 
 def test_hybrid_candidate_cap_cannot_exceed_source_stage_capacity() -> None:

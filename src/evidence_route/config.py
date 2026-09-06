@@ -63,6 +63,12 @@ class EvidenceSettings(ConfigModel):
     lexical_weight: float = Field(default=0.2, ge=0, le=1)
     source_weight: float = Field(default=0.1, ge=0, le=1)
     dense_weight: float = Field(default=0.7, ge=0, le=1)
+    acquisition_weight: float = Field(
+        default=0.0,
+        ge=0,
+        le=1,
+        exclude_if=lambda value: value == 0.0,
+    )
 
     @model_validator(mode="after")
     def validate_retrieval(self) -> EvidenceSettings:
@@ -71,7 +77,10 @@ class EvidenceSettings(ConfigModel):
         if self.final_per_source > self.passages_per_source:
             raise ValueError("final_per_source cannot exceed passages_per_source")
         if not math.isclose(
-            self.lexical_weight + self.source_weight + self.dense_weight,
+            self.lexical_weight
+            + self.source_weight
+            + self.dense_weight
+            + self.acquisition_weight,
             1.0,
         ):
             raise ValueError("retrieval weights must sum to one")

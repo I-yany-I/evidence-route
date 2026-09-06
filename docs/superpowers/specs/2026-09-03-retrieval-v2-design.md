@@ -46,7 +46,9 @@ under v2.
 
 For the incoming query, score all sentence records with the existing project tokenizer and BM25. Group
 records by canonical source URL and rank sources by a deterministic aggregate of their best sentence
-scores. Keep at most 64 sources, then retain at most four highest-scoring passages per source, capped at
+scores. Calibration diagnostics showed that the original 64-source pool excluded too many eligible
+gold sources, while adding passages from those same sources did not improve final recall. The frozen v2
+configuration therefore keeps at most 256 sources and one highest-scoring passage per source, capped at
 256 passages total. This prevents one repetitive source from consuming the candidate budget while
 retaining passage-level provenance and original evidence IDs.
 
@@ -62,9 +64,13 @@ model preparation receipt fix the exact package version, model revision, and req
 evaluation. Runtime evaluation must use local files only and must not download models implicitly.
 
 Each candidate is encoded as title plus passage text. Query-to-passage cosine similarity is combined
-with normalized lexical and source-rank signals using weights selected only on the train calibration
-cohort. Final selection is deterministic, capped at two passages per source, and returns the existing
-`Evidence` contract with no fabricated text or rewritten source identity.
+with normalized lexical, query-time source-rank, and frozen acquisition-rank signals using weights
+selected only on the train calibration cohort. Acquisition rank is the first occurrence of a canonical
+source URL in the frozen knowledge-store member. It preserves the upstream coarse-retrieval order
+produced by the benchmark's search pipeline and is computed without parsing evidence IDs or reading
+scorer data. Its weight is explicit in configuration and defaults to zero for existing configurations.
+Final selection is deterministic, capped at one passage per source in the frozen v2 configuration, and
+returns the existing `Evidence` contract with no fabricated text or rewritten source identity.
 
 The encoder is injected behind a narrow protocol so unit tests use a deterministic fake. If v2 is
 selected and the model asset or receipt is missing, mismatched, or unreadable, retrieval fails closed;
@@ -73,7 +79,8 @@ it must not silently fall back to v1 during a benchmark campaign.
 ## Configuration And Freeze Identity
 
 The v2 configuration records retrieval mode, source candidate count, passages per source, dense
-candidate count, per-source final cap, model ID, model revision, receipt SHA-256, and scoring weights.
+candidate count, per-source final cap, model ID, model revision, receipt SHA-256, and all four scoring
+weights, including the acquisition-rank weight.
 All numeric limits are positive and internally consistent. The campaign freeze binds the model receipt
 alongside config, corpus, prompt, pricing, evaluator, and dependency hashes. No secret or absolute local
 path enters a committed config or report.
@@ -98,7 +105,7 @@ from a separately stored timing section.
 
 No paid provider call is allowed until all of these gates pass:
 
-- Source-candidate recall at 64 is at least 22/27 (81.48%) on the frozen calibration diagnostic.
+- Source-candidate recall at 256 is at least 22/27 (81.48%) on the frozen calibration diagnostic.
 - Hybrid final top-8 gold-source recall is at least 14/27 (51.85%) and at least twice the 5/27 v1 rate.
 - `train-2468` returns at least one passage from its frozen gold source in top eight.
 - Two repeated diagnostics produce identical ranked evidence IDs for every claim.

@@ -10,6 +10,7 @@ from evidence_route.providers.averitec import AveritecFrozenProvider
 from evidence_route.providers.averitec_v2 import (
     AveritecHybridProvider,
     RetrievalModelError,
+    fuse_candidates,
     load_frozen_index,
     source_candidates,
 )
@@ -110,6 +111,59 @@ def test_source_candidates_round_robin_before_dense_cap_preserves_sources(
     ]
 
 
+def test_frozen_acquisition_rank_is_independent_of_query_rank(tmp_path: Path) -> None:
+    rows = [
+        ("z-first", "Source A", "HTTPS://A.TEST:443/path/#first", "generic text"),
+        ("m-same-source", "Source A", "https://a.test/path", "more generic text"),
+        ("a-query-match", "Source B", "https://b.test/", "decisive phrase"),
+        ("0-third", "Source C", "https://c.test/", "other generic text"),
+    ]
+    path = tmp_path / "claim-1.jsonl"
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for evidence_id, title, source_url, text in rows:
+            handle.write(
+                json.dumps(
+                    {
+                        "evidence_id": evidence_id,
+                        "title": title,
+                        "source_url": source_url,
+                        "text": text,
+                        "snapshot_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                    }
+                )
+                + "\n"
+            )
+
+    candidates = source_candidates(
+        load_frozen_index(path),
+        "decisive phrase",
+        source_candidate_k=3,
+        passages_per_source=2,
+        dense_candidate_k=4,
+    )
+
+    assert [
+        (item.record.evidence_id, item.source_key, item.source_rank, item.acquisition_rank)
+        for item in candidates
+    ] == [
+        ("a-query-match", "https://b.test/", 0, 1),
+        ("0-third", "https://c.test/", 1, 2),
+        ("m-same-source", "https://a.test/path", 2, 0),
+        ("z-first", "https://a.test/path", 2, 0),
+    ]
+    ranked = fuse_candidates(
+        candidates,
+        [0.0, 0.0, 0.0, 0.0],
+        lexical_weight=0.0,
+        source_weight=0.0,
+        dense_weight=0.0,
+        acquisition_weight=1.0,
+        top_k=1,
+        final_per_source=1,
+    )
+    assert ranked[0][0].source_key == "https://a.test/path"
+
+
 class FakeEncoder:
     model_id = "fixture-dense"
 
@@ -134,6 +188,7 @@ def _hybrid_settings() -> dict[str, object]:
         "lexical_weight": 0.2,
         "source_weight": 0.1,
         "dense_weight": 0.7,
+        "acquisition_weight": 0.0,
         "final_per_source": 2,
     }
 
