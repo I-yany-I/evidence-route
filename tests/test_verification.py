@@ -19,6 +19,7 @@ from evidence_route.verification import (
     VerdictJudge,
     project_citations,
     result_from_draft,
+    worker_result_from_draft,
 )
 
 
@@ -244,19 +245,95 @@ def test_project_citations_does_not_invent_missing_claim_unit_evidence() -> None
     assert {unit for item in projected for unit in item.claim_unit_ids} == {"u0"}
 
 
-def test_project_citations_keeps_same_source_when_it_covers_distinct_units() -> None:
+def test_project_citations_selects_one_unchanged_citation_per_canonical_url() -> None:
     evidence = [citation_evidence("e1", "https://example.org/one")]
     projected = project_citations(
         [
             citation("e1", "https://example.org/one", ["u0"]),
-            citation("e1", "https://example.org/one", ["u1"]),
+            citation("e1", "HTTPS://EXAMPLE.ORG:443/one/#fragment", ["u1"]),
         ],
         evidence,
         max_citations=4,
     )
 
-    assert len(projected) == 2
-    assert [item.claim_unit_ids for item in projected] == [["u0"], ["u1"]]
+    assert len(projected) == 1
+    assert projected[0].claim_unit_ids == ["u0"]
+    assert projected[0].quote == "Quoted text from e1."
+
+
+def test_project_citations_does_not_merge_provenance_across_same_url() -> None:
+    evidence = [
+        citation_evidence("e1", "https://example.org/one"),
+        citation_evidence("e2", "https://example.org/one"),
+    ]
+    projected = project_citations(
+        [
+            citation("e1", "https://example.org/one", ["u0"]),
+            citation("e2", "HTTPS://EXAMPLE.ORG:443/one/#fragment", ["u1"]),
+        ],
+        evidence,
+        max_citations=2,
+    )
+
+    assert len(projected) == 1
+    assert projected[0].evidence_id == "e1"
+    assert projected[0].claim_unit_ids == ["u0"]
+    assert projected[0].quote == "Quoted text from e1."
+
+
+def test_project_citations_never_selects_one_evidence_id_with_two_urls() -> None:
+    evidence = [citation_evidence("e1", "https://example.org/one")]
+    projected = project_citations(
+        [
+            citation("e1", "https://example.org/one", ["u0"]),
+            citation("e1", "https://example.org/alternate", ["u1"]),
+        ],
+        evidence,
+        max_citations=2,
+    )
+
+    assert len(projected) == 1
+    assert projected[0].evidence_id == "e1"
+
+
+def test_project_citations_maximizes_claim_unit_coverage_within_citation_limit() -> None:
+    evidence = [
+        citation_evidence("e-a", "https://example.org/a"),
+        citation_evidence("e-b", "https://example.org/b"),
+        citation_evidence("e-c", "https://example.org/c"),
+    ]
+    projected = project_citations(
+        [
+            citation("e-a", "https://example.org/a", ["u0", "u1"]),
+            citation("e-b", "https://example.org/b", ["u0", "u2"]),
+            citation("e-c", "https://example.org/c", ["u1", "u3"]),
+        ],
+        evidence,
+        max_citations=2,
+        known_claim_unit_ids=["u0", "u1", "u2", "u3"],
+    )
+
+    assert [item.evidence_id for item in projected] == ["e-b", "e-c"]
+    assert {unit for item in projected for unit in item.claim_unit_ids} == {
+        "u0",
+        "u1",
+        "u2",
+        "u3",
+    }
+
+
+def test_project_citations_rejects_oversized_candidate_output() -> None:
+    evidence = [
+        citation_evidence(f"e{index}", f"https://example.org/{index}")
+        for index in range(17)
+    ]
+    citations = [
+        citation(f"e{index}", f"https://example.org/{index}", [f"u{index}"])
+        for index in range(17)
+    ]
+
+    with pytest.raises(ValueError, match="at most 16"):
+        project_citations(citations, evidence, max_citations=12)
 
 
 def test_result_from_draft_discards_unknown_claim_units_without_fabricating_coverage() -> None:
@@ -288,6 +365,177 @@ def test_result_from_draft_discards_unknown_claim_units_without_fabricating_cove
     )
 
     assert [item.claim_unit_ids for item in result.citations] == [["u0"]]
+
+
+def test_result_from_draft_discards_citations_outside_explicit_available_evidence() -> None:
+    draft = type(
+        "Draft",
+        (),
+        {
+            "verdict": Verdict.SUPPORTED,
+            "confidence": 0.9,
+            "rationale": "supported",
+            "citations": [citation("e2", "https://example.org/two")],
+        },
+    )()
+    response = type(
+        "Response",
+        (),
+        {
+            "value": draft,
+            "usage": Usage(input_tokens=1, output_tokens=1, total_tokens=2, complete=True),
+        },
+    )()
+
+    result = result_from_draft(
+        response,
+        "dev-0",
+        "single",
+        [
+            citation_evidence("e1", "https://example.org/one"),
+            citation_evidence("e2", "https://example.org/two"),
+        ],
+        available_evidence_ids=["e1"],
+    )
+
+    assert result.citations == []
+
+
+def test_result_from_draft_discards_url_not_bound_to_supplied_evidence() -> None:
+    draft = type(
+        "Draft",
+        (),
+        {
+            "verdict": Verdict.SUPPORTED,
+            "confidence": 0.9,
+            "rationale": "supported",
+            "citations": [citation("e1", "https://attacker.example/fabricated")],
+        },
+    )()
+    response = type(
+        "Response",
+        (),
+        {
+            "value": draft,
+            "usage": Usage(input_tokens=1, output_tokens=1, total_tokens=2, complete=True),
+        },
+    )()
+
+    result = result_from_draft(
+        response,
+        "dev-0",
+        "single",
+        [citation_evidence("e1", "https://example.org/one")],
+    )
+
+    assert result.citations == []
+
+
+def test_result_from_draft_preserves_explicit_empty_available_evidence() -> None:
+    draft = type(
+        "Draft",
+        (),
+        {
+            "verdict": Verdict.SUPPORTED,
+            "confidence": 0.9,
+            "rationale": "supported",
+            "citations": [citation("e1", "https://example.org/one")],
+        },
+    )()
+    response = type(
+        "Response",
+        (),
+        {
+            "value": draft,
+            "usage": Usage(input_tokens=1, output_tokens=1, total_tokens=2, complete=True),
+        },
+    )()
+
+    result = result_from_draft(
+        response,
+        "dev-0",
+        "single",
+        [citation_evidence("e1", "https://example.org/one")],
+        available_evidence_ids=[],
+    )
+
+    assert result.available_evidence_ids == []
+    assert result.citations == []
+    defaulted = result_from_draft(
+        response,
+        "dev-0",
+        "single",
+        [citation_evidence("e1", "https://example.org/one")],
+    )
+    assert defaulted.available_evidence_ids == ["e1"]
+    assert [item.evidence_id for item in defaulted.citations] == ["e1"]
+
+
+def test_worker_result_from_draft_preserves_explicit_empty_available_evidence() -> None:
+    draft = type(
+        "Draft",
+        (),
+        {
+            "verdict": Verdict.SUPPORTED,
+            "confidence": 0.9,
+            "citations": [citation("e1", "https://example.org/one")],
+            "errors": [],
+        },
+    )()
+    response = type(
+        "Response",
+        (),
+        {
+            "value": draft,
+            "usage": Usage(input_tokens=1, output_tokens=1, total_tokens=2, complete=True),
+        },
+    )()
+
+    result = worker_result_from_draft(
+        response,
+        VerificationTask(task_id="t0", claim_unit_ids=["u0"], query="claim"),
+        [citation_evidence("e1", "https://example.org/one")],
+        available_evidence_ids=[],
+    )
+
+    assert result.available_evidence_ids == []
+    assert result.citations == []
+    defaulted = worker_result_from_draft(
+        response,
+        VerificationTask(task_id="t0", claim_unit_ids=["u0"], query="claim"),
+        [citation_evidence("e1", "https://example.org/one")],
+    )
+    assert defaulted.available_evidence_ids == ["e1"]
+    assert [item.evidence_id for item in defaulted.citations] == ["e1"]
+
+
+def test_worker_result_from_draft_discards_url_not_bound_to_supplied_evidence() -> None:
+    draft = type(
+        "Draft",
+        (),
+        {
+            "verdict": Verdict.SUPPORTED,
+            "confidence": 0.9,
+            "citations": [citation("e1", "https://attacker.example/fabricated")],
+            "errors": [],
+        },
+    )()
+    response = type(
+        "Response",
+        (),
+        {
+            "value": draft,
+            "usage": Usage(input_tokens=1, output_tokens=1, total_tokens=2, complete=True),
+        },
+    )()
+
+    result = worker_result_from_draft(
+        response,
+        VerificationTask(task_id="t0", claim_unit_ids=["u0"], query="claim"),
+        [citation_evidence("e1", "https://example.org/one")],
+    )
+
+    assert result.citations == []
 
 
 @pytest.mark.asyncio
@@ -391,7 +639,7 @@ async def test_judge_emits_citations_in_canonical_evidence_id_order() -> None:
             "status": ResultStatus.COMPLETED,
             "verdict": Verdict.SUPPORTED,
             "confidence": 0.9,
-            "citations": [],
+            "citations": citations,
             "available_evidence_ids": ["e1", "e2"],
             "errors": [],
             "usage": Usage(input_tokens=1, output_tokens=1, total_tokens=2, complete=True),
@@ -413,6 +661,101 @@ async def test_judge_emits_citations_in_canonical_evidence_id_order() -> None:
     ).judge("run", "dev-0", "claim", [worker], initial_route="multi", escalated=False)
 
     assert [citation.evidence_id for citation in result.citations] == ["e1", "e2"]
+
+
+@pytest.mark.asyncio
+async def test_judge_deduplicates_identical_citations_aggregated_from_three_workers() -> None:
+    citations = [
+        citation(
+            f"e{index}",
+            f"https://example.org/{index}",
+            [f"u{index}"],
+        )
+        for index in range(6)
+    ]
+    workers = [
+        type(
+            "Worker",
+            (),
+            {
+                "status": ResultStatus.COMPLETED,
+                "verdict": Verdict.SUPPORTED,
+                "confidence": 0.9,
+                "claim_unit_ids": [f"u{index}" for index in range(6)],
+                "citations": citations,
+                "available_evidence_ids": [f"e{index}" for index in range(6)],
+                "errors": [],
+                "usage": Usage(
+                    input_tokens=1,
+                    output_tokens=1,
+                    total_tokens=2,
+                    complete=True,
+                ),
+            },
+        )()
+        for _ in range(3)
+    ]
+    draft = type(
+        "Draft",
+        (),
+        {
+            "verdict": Verdict.SUPPORTED,
+            "confidence": 0.9,
+            "rationale": "ok",
+            "citations": citations,
+        },
+    )()
+
+    result = await VerdictJudge(
+        LLM(draft), EvidenceSettings(), GenerationSettings()
+    ).judge("run", "dev-0", "claim", workers, initial_route="multi", escalated=False)
+
+    assert [item.evidence_id for item in result.citations] == [
+        "e0",
+        "e1",
+        "e2",
+        "e3",
+        "e4",
+        "e5",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_judge_uses_worker_citation_provenance_instead_of_draft_content() -> None:
+    trusted = citation("e1", "https://example.org/one", ["u0"])
+    worker = type(
+        "Worker",
+        (),
+        {
+            "status": ResultStatus.COMPLETED,
+            "verdict": Verdict.SUPPORTED,
+            "confidence": 0.9,
+            "claim_unit_ids": ["u0"],
+            "citations": [trusted],
+            "available_evidence_ids": ["e1"],
+            "errors": [],
+            "usage": Usage(input_tokens=1, output_tokens=1, total_tokens=2, complete=True),
+        },
+    )()
+    fabricated = trusted.model_copy(
+        update={"quote": "fabricated quote", "answer": "fabricated answer"}
+    )
+    draft = type(
+        "Draft",
+        (),
+        {
+            "verdict": Verdict.SUPPORTED,
+            "confidence": 0.9,
+            "rationale": "ok",
+            "citations": [fabricated],
+        },
+    )()
+
+    result = await VerdictJudge(
+        LLM(draft), EvidenceSettings(), GenerationSettings()
+    ).judge("run", "dev-0", "claim", [worker], initial_route="multi", escalated=False)
+
+    assert result.citations == [trusted]
 
 
 @pytest.mark.asyncio

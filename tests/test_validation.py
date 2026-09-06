@@ -246,13 +246,20 @@ def test_adjudication_preserves_distinct_claim_units_from_one_evidence_source() 
 
     adjudicated = adjudicate_verification_results([candidate])
 
-    assert len(adjudicated.citations) == 2
-    assert [citation.claim_unit_ids for citation in adjudicated.citations] == [["u0"], ["u1"]]
+    assert len(adjudicated.citations) == 1
+    assert adjudicated.citations[0].claim_unit_ids == ["u0"]
+    assert adjudicated.citations[0].quote == "quote"
 
 
-def test_validator_does_not_mark_distinct_claim_units_from_one_evidence_as_duplicate() -> None:
+def test_validator_rejects_duplicate_canonical_url_across_claim_units() -> None:
     first = result_with(Verdict.SUPPORTED, "e1")
-    second = first.citations[0].model_copy(update={"claim_unit_ids": ["u1"]})
+    second = Citation.model_validate(
+        {
+            **first.citations[0].model_dump(),
+            "claim_unit_ids": ["u1"],
+            "source_url": "HTTPS://EXAMPLE.ORG:443/e1/#fragment",
+        }
+    )
     result = first.model_copy(
         update={"citations": [first.citations[0], second]}
     )
@@ -265,7 +272,8 @@ def test_validator_does_not_mark_distinct_claim_units_from_one_evidence_as_dupli
         strategy="adaptive",
     )
 
-    assert decision.action is ValidationAction.ACCEPT
+    assert decision.action is ValidationAction.ESCALATE
+    assert decision.errors == ("DUPLICATE_CITATION",)
 
 def test_normalize_verification_result_preserves_distinct_conflicting_verdict() -> None:
     result = valid_result().model_copy(

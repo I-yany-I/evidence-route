@@ -37,6 +37,13 @@ from evidence_route.prompts import (
     worker_messages,
 )
 
+_MAX_CITATION_CANDIDATES = 16
+
+
+def _ensure_citation_candidate_limit(citations: Sequence[Citation]) -> None:
+    if len(citations) > _MAX_CITATION_CANDIDATES:
+        raise ValueError("citation projection accepts at most 16 candidates")
+
 
 def _safety_stop(error: Exception) -> bool:
     return isinstance(
@@ -61,6 +68,25 @@ def _evidence_sort_key(item: Evidence, index: int) -> tuple[object, ...]:
     )
 
 
+def _citation_provenance_key(item: Citation) -> tuple[object, ...]:
+    return (
+        item.evidence_id,
+        canonicalize_citation_url(str(item.source_url)),
+        tuple(sorted(set(item.claim_unit_ids))),
+        item.question,
+        item.answer,
+        item.quote,
+        item.stance,
+    )
+
+
+def _deduplicate_citations(citations: Sequence[Citation]) -> list[Citation]:
+    unique: dict[tuple[object, ...], Citation] = {}
+    for citation in citations:
+        unique.setdefault(_citation_provenance_key(citation), citation)
+    return [unique[key] for key in sorted(unique)]
+
+
 def project_citations(
     citations: Sequence[Citation],
     evidence: Sequence[Evidence] | Sequence[str],
@@ -71,16 +97,22 @@ def project_citations(
     """Project model citations onto a deterministic, evidence-backed representation."""
     if max_citations < 1:
         raise ValueError("max_citations must be positive")
+    _ensure_citation_candidate_limit(citations)
 
     if all(isinstance(item, Evidence) for item in evidence):
-        ordered_ids = [
-            item.evidence_id
-            for _, item in sorted(
-                enumerate(evidence), key=lambda pair: _evidence_sort_key(pair[1], pair[0])
+        ordered_ids = []
+        known_source_urls: dict[str, set[str]] = {}
+        for _, item in sorted(
+            enumerate(evidence), key=lambda pair: _evidence_sort_key(pair[1], pair[0])
+        ):
+            if item.evidence_id not in ordered_ids:
+                ordered_ids.append(item.evidence_id)
+            known_source_urls.setdefault(item.evidence_id, set()).add(
+                canonicalize_citation_url(str(item.source_url))
             )
-        ]
     elif all(isinstance(item, str) for item in evidence):
         ordered_ids = sorted(set(evidence))
+        known_source_urls = {}
     else:
         raise TypeError("evidence must contain only Evidence records or evidence IDs")
     evidence_rank = {evidence_id: index for index, evidence_id in enumerate(ordered_ids)}
@@ -102,6 +134,10 @@ def project_citations(
             }
         )
         source_url = canonicalize_citation_url(str(normalized.source_url))
+        if known_source_urls and source_url not in known_source_urls.get(
+            normalized.evidence_id, set()
+        ):
+            continue
         key = (
             evidence_rank[normalized.evidence_id],
             normalized.evidence_id,
@@ -113,42 +149,38 @@ def project_citations(
             normalized.stance,
         )
         candidates.append((key, normalized, source_url))
-
-    selected: list[Citation] = []
-    covered_units: set[str] = set()
-    used_source_units: set[tuple[str, frozenset[str]]] = set()
-    used_evidence_units: set[tuple[str, frozenset[str]]] = set()
-    remaining = sorted(candidates, key=lambda item: item[0])
-    while remaining and len(selected) < max_citations:
-        eligible = [
-            item
-            for item in remaining
-            if set(item[1].claim_unit_ids) - covered_units
-        ]
-        if not eligible:
-            break
-        _, chosen, source_url = min(
-            eligible,
-            key=lambda item: (
-                -len(set(item[1].claim_unit_ids) - covered_units),
-                item[0],
-            ),
-        )
-        selected.append(chosen)
-        covered_units.update(chosen.claim_unit_ids)
-        chosen_units = frozenset(chosen.claim_unit_ids)
-        used_source_units.add((source_url, chosen_units))
-        used_evidence_units.add((chosen.evidence_id, chosen_units))
-        remaining = [
-            item
-            for item in remaining
+    candidates.sort(key=lambda item: item[0])
+    # Select the citation subset with maximal unit coverage. Dynamic programming keeps
+    # the bounded citation cap while avoiding greedy choices that can miss full coverage.
+    states: dict[
+        tuple[int, frozenset[str], frozenset[str], frozenset[str]], tuple[int, ...]
+    ] = {(0, frozenset(), frozenset(), frozenset()): ()}
+    for index, (_, citation, source_url) in enumerate(candidates):
+        citation_units = frozenset(citation.claim_unit_ids)
+        for (count, covered, used_urls, used_evidence_ids), path in list(states.items()):
             if (
-                (item[2], frozenset(item[1].claim_unit_ids)) not in used_source_units
-                and (item[1].evidence_id, frozenset(item[1].claim_unit_ids))
-                not in used_evidence_units
+                count >= max_citations
+                or source_url in used_urls
+                or citation.evidence_id in used_evidence_ids
+            ):
+                continue
+            next_state = (
+                count + 1,
+                covered | citation_units,
+                used_urls | {source_url},
+                used_evidence_ids | {citation.evidence_id},
             )
-        ]
-    return selected
+            next_path = (*path, index)
+            current_path = states.get(next_state)
+            if current_path is None or next_path < current_path:
+                states[next_state] = next_path
+
+    best_state, selected_path = min(
+        states.items(),
+        key=lambda item: (-len(item[0][1]), item[0][0], item[1]),
+    )
+    del best_state
+    return [candidates[index][1] for index in selected_path]
 
 
 @dataclass(frozen=True)
@@ -168,6 +200,17 @@ def result_from_draft(
     escalated: bool = False,
 ) -> VerificationResult:
     draft: VerdictDraft = response.value
+    resolved_available_ids = (
+        [item.evidence_id for item in evidence]
+        if available_evidence_ids is None
+        else list(available_evidence_ids)
+    )
+    supplied_ids = (
+        {item.evidence_id for item in evidence}
+        if available_evidence_ids is None
+        else set(available_evidence_ids)
+    )
+    supplied_evidence = [item for item in evidence if item.evidence_id in supplied_ids]
     return VerificationResult(
         claim_id=claim_id,
         status=ResultStatus.COMPLETED,
@@ -176,11 +219,11 @@ def result_from_draft(
         rationale=draft.rationale,
         citations=project_citations(
             draft.citations,
-            evidence,
+            supplied_evidence,
             max_citations=max(1, len(evidence)),
             known_claim_unit_ids=known_claim_unit_ids,
         ),
-        available_evidence_ids=available_evidence_ids or [item.evidence_id for item in evidence],
+        available_evidence_ids=resolved_available_ids,
         initial_route=initial_route,
         escalated=escalated,
         usage=_usage(response),
@@ -195,6 +238,17 @@ def worker_result_from_draft(
     available_evidence_ids: list[str] | None = None,
 ) -> WorkerResult:
     draft: WorkerDraft = response.value
+    resolved_available_ids = (
+        [item.evidence_id for item in evidence]
+        if available_evidence_ids is None
+        else list(available_evidence_ids)
+    )
+    supplied_ids = (
+        {item.evidence_id for item in evidence}
+        if available_evidence_ids is None
+        else set(available_evidence_ids)
+    )
+    supplied_evidence = [item for item in evidence if item.evidence_id in supplied_ids]
     status = ResultStatus.PARTIAL if draft.errors else ResultStatus.COMPLETED
     return WorkerResult(
         task_id=task.task_id,
@@ -204,11 +258,11 @@ def worker_result_from_draft(
         confidence=draft.confidence,
         citations=project_citations(
             draft.citations,
-            evidence,
+            supplied_evidence,
             max_citations=max(1, len(evidence)),
             known_claim_unit_ids=task.claim_unit_ids,
         ),
-        available_evidence_ids=available_evidence_ids or [item.evidence_id for item in evidence],
+        available_evidence_ids=resolved_available_ids,
         usage=_usage(response),
         errors=draft.errors,
     )
@@ -452,6 +506,7 @@ class VerdictJudge:
             max_output_tokens=self.generation.judge.max_output_tokens,
         )
         draft: VerdictDraft = response.value
+        _ensure_citation_candidate_limit(draft.citations)
         available = sorted(
             {evidence_id for worker in workers for evidence_id in worker.available_evidence_ids}
         )
@@ -460,8 +515,25 @@ class VerdictJudge:
             for worker in workers
             for unit_id in getattr(worker, "claim_unit_ids", [])
         }
+        selected_provenance = {
+            (citation.evidence_id, canonicalize_citation_url(str(citation.source_url)))
+            for citation in draft.citations
+        }
+        trusted_citations = _deduplicate_citations(
+            [
+                citation
+                for worker in workers
+                for citation in worker.citations
+                if citation.evidence_id in worker.available_evidence_ids
+                and (
+                    citation.evidence_id,
+                    canonicalize_citation_url(str(citation.source_url)),
+                )
+                in selected_provenance
+            ]
+        )
         citations = project_citations(
-            draft.citations,
+            trusted_citations,
             available,
             max_citations=self.evidence_settings.judge_max_evidence,
             known_claim_unit_ids=sorted(worker_claim_unit_ids) or None,

@@ -7,12 +7,12 @@ from evidence_route.evaluation.stability import citation_is_valid, citation_urls
 from evidence_route.verification import result_from_draft
 
 
-def _evidence() -> list[Evidence]:
+def _evidence(source_url: str) -> list[Evidence]:
     return [
         Evidence(
             evidence_id="e1",
             title="Source",
-            source_url="https://example.org/fact",
+            source_url=source_url,
             text="The quoted text.",
             provider="averitec_frozen",
             snapshot_sha256="a" * 64,
@@ -49,7 +49,7 @@ def _result(url: str):
         response,
         "claim",
         "single",
-        _evidence(),
+        _evidence(url),
         available_evidence_ids=["e1"],
     )
 

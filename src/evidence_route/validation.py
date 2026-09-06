@@ -177,21 +177,20 @@ class ResultValidator:
         if normalized.status is ResultStatus.PARTIAL:
             errors.extend(normalized.errors or ["INCOMPLETE_COVERAGE"])
         cited_units: set[str] = set()
-        seen_citations: set[tuple[str, frozenset[str]]] = set()
+        seen_urls: set[str] = set()
+        seen_evidence_ids: set[str] = set()
         for citation in normalized.citations:
             if citation.evidence_id not in allowed:
                 errors.append(f"UNKNOWN_EVIDENCE:{citation.evidence_id}")
-            citation_key = (
-                canonicalize_citation_url(str(citation.source_url)),
-                frozenset(citation.claim_unit_ids),
-            )
-            if citation_key in seen_citations:
+            citation_url = canonicalize_citation_url(str(citation.source_url))
+            if citation_url in seen_urls or citation.evidence_id in seen_evidence_ids:
                 errors.append("DUPLICATE_CITATION")
             unknown_units = set(citation.claim_unit_ids) - units
             if unknown_units:
                 errors.append("UNKNOWN_CLAIM_UNIT")
             cited_units.update(set(citation.claim_unit_ids) & units)
-            seen_citations.add(citation_key)
+            seen_urls.add(citation_url)
+            seen_evidence_ids.add(citation.evidence_id)
         coverage = len(cited_units) / len(units) if units else 1.0
         requires_full_coverage = normalized.verdict is not Verdict.NOT_ENOUGH_EVIDENCE
         if requires_full_coverage and coverage < self.minimum_coverage:
