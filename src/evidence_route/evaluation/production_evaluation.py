@@ -127,6 +127,13 @@ def _require_file(path: Path, label: str) -> Path:
     return path
 
 
+def _parent_activity_paths(repository_root: Path, activity_id: str) -> tuple[Path, Path]:
+    """Return the persisted parent activity directory and its shared run store."""
+
+    activity_dir = repository_root / "artifacts" / "evaluation" / activity_id
+    return activity_dir, activity_dir / "run-store.sqlite3"
+
+
 def _validate_selected_routing_policy(
     calibration_report: Path,
     app_config: AppConfig,
@@ -683,11 +690,8 @@ class ProductionCampaignService:
         parent_run_store_path: Path | None = None
         if experiment_mode:
             assert parent_activity is not None
-            parent_activity_dir = (
-                self.repository_root / "artifacts" / "evaluation" / parent_activity
-            )
-            parent_run_store_path = (
-                self.repository_root / "artifacts" / parent_activity / "run-store.sqlite3"
+            parent_activity_dir, parent_run_store_path = _parent_activity_paths(
+                self.repository_root, parent_activity
             )
             if not parent_activity_dir.is_dir():
                 raise ValueError(f"parent activity directory is missing: {parent_activity_dir}")

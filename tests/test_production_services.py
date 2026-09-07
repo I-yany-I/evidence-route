@@ -40,6 +40,7 @@ from evidence_route.evaluation.production_calibration import (
 from evidence_route.evaluation.production_evaluation import (
     _billing_recovery_items,
     _evaluation_activity_is_closed,
+    _parent_activity_paths,
     _validate_selected_routing_policy,
 )
 from evidence_route.evaluation.runner import CampaignProcessInterruption
@@ -206,6 +207,17 @@ def test_experiment_routing_policy_is_checked_against_parent_config(tmp_path: Pa
     )
 
     _validate_selected_routing_policy(report, experiment_config, parent_config)
+
+
+def test_parent_activity_paths_use_evaluation_run_store_layout(tmp_path: Path) -> None:
+    activity_dir, run_store = _parent_activity_paths(
+        tmp_path, "evidence-route-gate-a-20260830-clean1"
+    )
+
+    assert activity_dir == (
+        tmp_path / "artifacts" / "evaluation" / "evidence-route-gate-a-20260830-clean1"
+    )
+    assert run_store == activity_dir / "run-store.sqlite3"
 
 
 class _Transport:
