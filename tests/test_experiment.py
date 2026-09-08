@@ -20,6 +20,8 @@ from evidence_route.evaluation.experiment import (
 )
 from evidence_route.evaluation.lifecycle import sha256_file
 
+pytest_plugins = ["tests.fixtures.evaluation.report_factory"]
+
 
 def _write(path: Path, payload: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -344,9 +346,9 @@ def test_repeat_zero_reuse_accepts_legacy_artifact_without_fallback_marker(
 
 
 def test_materialize_calibration_assets_copies_parent_without_rewriting_it(
-    tmp_path: Path,
+    tmp_path: Path, report_input_factory,
 ) -> None:
-    parent = Path("artifacts/evaluation/evidence-route-gate-a-20260830-clean1")
+    parent = report_input_factory.activity_dir
     target = tmp_path / "experiment"
     before = {
         name: (parent / name).read_bytes()
@@ -358,11 +360,21 @@ def test_materialize_calibration_assets_copies_parent_without_rewriting_it(
         parent_activity_dir=parent,
         experiment_activity_dir=target,
         experiment_activity_id="stability-hardening-test",
-        parent_activity_id="evidence-route-gate-a-20260830-clean1",
+        parent_activity_id="gate-a",
     )
 
     assert all((target / name).read_bytes() == payload for name, payload in before.items())
-    assert (target / "calibration" / "runtime-cases.jsonl").is_file()
+    source_cases = parent / "calibration"
+    target_cases = target / "calibration"
+    assert target_cases.is_dir()
+    source_files = sorted(path.relative_to(source_cases) for path in source_cases.rglob("*"))
+    target_files = sorted(path.relative_to(target_cases) for path in target_cases.rglob("*"))
+    assert target_files == source_files
+    assert all(
+        (target_cases / relative).read_bytes() == (source_cases / relative).read_bytes()
+        for relative in source_files
+        if (source_cases / relative).is_file()
+    )
     activity = json.loads((target / "activity.json").read_text(encoding="utf-8"))
     assert activity["activity_id"] == "stability-hardening-test"
     assert activity["calibration_status"] == "complete"

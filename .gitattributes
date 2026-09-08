@@ -1,7 +1,11 @@
 third_party/averitec/paper/eval.py -text
+/.gitattributes text eol=lf
 third_party/averitec/paper/utils.py -text
 third_party/averitec/shared_task/evaluate_veracity.py -text
 third_party/averitec/paper/leven.py text eol=lf
 third_party/averitec/paper/eval.py whitespace=-trailing-space
 third_party/averitec/paper/utils.py whitespace=-trailing-space
 third_party/averitec/shared_task/evaluate_veracity.py whitespace=-trailing-space
+tests/fixtures/evaluation/*.json text eol=lf
+tests/fixtures/evaluation/*.jsonl text eol=lf
+tests/fixtures/evaluation/*.sha256 text eol=lf
