@@ -201,6 +201,18 @@ corpus 中确有 gold 来源的样本里，当前 sentence-level BM25 top-k 只�
 calibration 检索门禁上验证召回改善，再决定是否开启新的完整付费 campaign。诊断口径、输入哈希、
 逐项结果和典型漏召回见 [docs/RETRIEVAL_DIAGNOSTIC_20260903.md](docs/RETRIEVAL_DIAGNOSTIC_20260903.md)。
 
+最新质量恢复活动 `evidence-route-quality-recovery-v2g-20260907` 已停止付费评测并进入终态：
+calibration、dev、stability 均为 `complete`，280 个 work item 中 270 completed、10 failed，
+无 pending/running 项；账本记录 744 次 fresh call、810 次 transport attempt，usage 完整、无
+billing uncertainty，活动总成本为 CNY 88.882632。冻结 dev balanced subset（n=80）上，adaptive
+full-manifest macro-F1 为 0.317、完成率 97.5%，相对 always_multi 降低 27.7% token 和 32.0%
+实测成本；严格 stability 为 16/20（80.0%）。离线检索门禁达到 22/32 candidate source hit、
+20/32 final top-8 hit，并命中 sentinel `train-2468`。不过 adaptive 质量低于 0.392、稳定性低于
+17/20，且最终证据审计发现 calibration 身份、run-store call set、prompt freeze、NLTK 资产与
+recovery evidence 不完整等问题，因此报告为 `publishable=false`。这些结果是可复核的失败分析，
+不覆盖上面的 Gate A 发布结果。详见
+[docs/EVIDENCE_QUALITY_RECOVERY_V2G_20260908.md](docs/EVIDENCE_QUALITY_RECOVERY_V2G_20260908.md)。
+
 简历项目表述、90 秒讲法和常见追问见 [docs/RESUME_PROJECT.md](docs/RESUME_PROJECT.md)。其中明确区分了可复现工程上界、可发布结果与未达到项目门槛的诊断实验。
 
 ## Artifact And Metric Definitions
