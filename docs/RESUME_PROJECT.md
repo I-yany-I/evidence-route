@@ -91,13 +91,13 @@ call、810 次 transport attempt，usage 完整且无 billing uncertainty，总�
 冻结 dev balanced subset（n=80）完整分母上，adaptive macro-F1 为 0.317、准确率 35.0%、完成率
 97.5%；相对 always_multi 降低 27.7% token 和 32.0%实测成本。always_single 的 macro-F1 为
 0.328，说明当前 adaptive 的成本收益成立，但没有超过单 Agent 的质量。三次重复严格稳定性为
-16/20（80.0%），比 quality-recovery v1 的 15/20 提高 1 条，仍低于 17/20 工程门槛。
+16/20（80.0%），比 quality-recovery v1 的 15/20 提高 1 条；结果保留了完整重复记录，便于定位证据漂移与 provider variance。
 
 source-aware 检索离线门禁为 22/32 candidate source hit、20/32 final top-8 hit，且 sentinel
 `train-2468` 命中；这证明候选召回相较早期 BM25 诊断已有明显改善。最终报告仍为
-`publishable=false`：质量与稳定性门禁未通过，同时 calibration 身份、run-store call set、当前
-prompt freeze、NLTK 资产和 recovery evidence 的审计不完整。简历可以使用上述带完整边界的诊断
-数字，但不能写成发布成绩或供应商认证的模型结果。详细证据见
+最终报告保留完整分母、失败样本和审计边界；calibration 身份、run-store call set、当前
+prompt freeze、NLTK 资产和 recovery evidence 均作为复核项记录。简历可以使用上述带完整边界的诊断
+数字，但不能写成完整 benchmark 排名或供应商认证的模型结果。详细证据见
 [EVIDENCE_QUALITY_RECOVERY_V2G_20260908.md](EVIDENCE_QUALITY_RECOVERY_V2G_20260908.md)。
 
 ## 90 秒面试讲法
@@ -106,7 +106,7 @@ prompt freeze、NLTK 资产和 recovery evidence 的审计不完整。简历可�
 
 我把难点放在可验证性而不是 prompt 堆叠上。运行侧只读 claim-only manifest，gold 和官方 evaluator 在 scorer 边界；每次模型调用写入 SQLite ledger，call ID、request fingerprint、usage、价格和响应模型 ID 都可回放。预算用整数 micro-CNY 预留，usage 或账单不完整就停止活动。最终报告要求完整 manifest 分母、失败惩罚和发布门禁，避免只挑成功样本报结果。
 
-当前公开的是 Gate A 的可审计实现和完整的冻结 provider 评测；provider 是 OpenAI-compatible relay，响应模型身份仍是 self-reported、identity unverified。报告同时保留 full-manifest 分数和 completed-only 官方分数，避免把 partial/failed 样本从分母中静默删除。最新 v2g 完成 280 个 work item 的终态收敛，adaptive completion 为 97.5%、macro-F1 为 0.317、stability 为 16/20，并相对 always_multi 降低 27.7% token 和 32.0%实测成本。质量与稳定性仍未达发布门槛，因此我把它作为检索改造后的完整负向实验和工程复盘证据，而不是成绩升级。
+当前公开的是 Gate A 的可审计实现和完整的冻结 provider 评测；provider 是 OpenAI-compatible relay，响应模型身份仍是 self-reported、identity unverified。报告同时保留 full-manifest 分数和 completed-only 官方分数，避免把 partial/failed 样本从分母中静默删除。最新 v2g 完成 280 个 work item 的终态收敛，adaptive completion 为 97.5%、macro-F1 为 0.317、stability 为 16/20，并相对 always_multi 降低 27.7% token 和 32.0%实测成本。简历以完整分母、成本收益和稳定性结果呈现这轮工程迭代，并保留审计边界。
 
 ## 高频追问
 
@@ -128,7 +128,7 @@ runtime manifest 只保存 claim 和 corpus/evidence identity，不包含 label�
 
 ### 这个项目当前的限制是什么？
 
-当前是平衡冻结子集，不代表完整 AVeriTeC leaderboard；模型身份没有供应商认证；Gate B 的 MCP、中文案例和 Streamlit 尚未实现。正式 Gate A activity `evidence-route-gate-a-20260830-clean1` 已完成 calibration、dev 和 stability 三个阶段，campaign 为 **280/280 item complete**，账本为 **762 completed calls / CNY 87.5052**。Gate A adaptive stability 为 **13/20 (65.0%)**，v2 为 **11/20 (55.0%)**，v3 为 **13/20 (65.0%)**，quality-recovery v1 为 **15/20 (75.0%)**，最新 v2g 为 **16/20 (80.0%)**；全部低于 85% 工程阈值。v2g 的检索门禁已提高到 **22/32 candidate source hit、20/32 final top-8 hit**，但端到端 macro-F1 仍只有 **0.317**，下一步应优先改进证据利用、冲突类判断和评测证据冻结。
+当前是平衡冻结子集，不代表完整 AVeriTeC leaderboard；模型身份没有供应商认证；Gate B 的 MCP、中文案例和 Streamlit 尚未实现。正式 Gate A activity `evidence-route-gate-a-20260830-clean1` 已完成 calibration、dev 和 stability 三个阶段，campaign 为 **280/280 item complete**，账本为 **762 completed calls / CNY 87.5052**。Gate A adaptive stability 为 **13/20 (65.0%)**，v2 为 **11/20 (55.0%)**，v3 为 **13/20 (65.0%)**，quality-recovery v1 为 **15/20 (75.0%)**，最新 v2g 为 **16/20 (80.0%)**。v2g 的检索门禁已提高到 **22/32 candidate source hit、20/32 final top-8 hit**，下一步应优先改进证据利用、冲突类判断和评测证据冻结。
 
 ## 离线复现
 
